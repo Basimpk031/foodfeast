@@ -44,3 +44,4 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 service_account.json
+assets/service_account.json
