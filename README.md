@@ -19,7 +19,7 @@ A full-featured **food ordering mobile app** built with Flutter & Firebase. Food
 ## ✨ Features
 
 ### 👤 User
-- 🔐 Login / Signup with Firebase Auth (OTP & Email)
+- 🔐 Login / Signup with Firebase Auth (Email & Phone Number)
 - 🏠 Home feed with restaurants, offers & bundles
 - 🤖 **AI-powered food recommendations** based on BMI, calorie goals & diet preferences
 - 🔍 Search & filter restaurants by location
