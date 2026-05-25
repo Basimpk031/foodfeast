@@ -354,7 +354,7 @@ class _MapPickerScreenState extends State<MapPickerScreen> {
             // OSM tile layer — free, no key
             TileLayer(
               urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-              userAgentPackageName: 'com.example.loginpage',
+              userAgentPackageName: 'com.foodfeast.app',
             ),
           ],
         ),

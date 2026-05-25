@@ -6,16 +6,13 @@ A full-featured **food ordering mobile app** built with Flutter & Firebase. Food
 
 ## 📱 Screenshots
 
-<!-- Add your screenshots here. Example:
+📸 Screenshots 
 <p float="left">
-  <img src="screenshots/splash.png" width="200"/>
-  <img src="screenshots/home.png" width="200"/>
-  <img src="screenshots/cart.png" width="200"/>
-  <img src="screenshots/tracking.png" width="200"/>
+  <img src="screenshots/splash.jpg" width="200"/>
+  <img src="screenshots/home.jpg" width="200"/>
+  <img src="screenshots/cart.jpg" width="200"/>
+  <img src="screenshots/tracking.jpg" width="200"/>
 </p>
--->
-
-> 📸 _Screenshots coming soon_
 
 ---
 

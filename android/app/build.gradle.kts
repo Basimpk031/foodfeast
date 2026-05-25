@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.loginpage"
+    namespace = "com.foodfeast.app"
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
@@ -21,8 +21,8 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.loginpage"
-        minSdk = flutter.minSdkVersion        // google_maps_flutter requires minimum 21
+        applicationId = "com.foodfeast.app"
+        minSdk = flutter.minSdkVersion
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName

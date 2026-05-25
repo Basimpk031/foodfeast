@@ -48,6 +48,50 @@
           ]
         }
       }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:550758439466:android:da1980eabd03026319c153",
+        "android_client_info": {
+          "package_name": "com.foodfeast.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "550758439466-l5cajt1ek6mvg3kbd3av166992jf9bno.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.foodfeast.app",
+            "certificate_hash": "e754c0dcf70d882cb1445b670af080fd80f37c9e"
+          }
+        },
+        {
+          "client_id": "550758439466-hkeoorfgslpl2296q285p0hpqkrl08et.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAx_AhP0euCeudfKdSyIEICrZEO-FoOjDA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "550758439466-hkeoorfgslpl2296q285p0hpqkrl08et.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "550758439466-q23t1bci2sah2gt6jk987o133mcsn8lp.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.loginpage"
+              }
+            }
+          ]
+        }
+      }
     }
   ],
   "configuration_version": "1"

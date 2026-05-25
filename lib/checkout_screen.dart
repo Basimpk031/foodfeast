@@ -257,7 +257,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   // ⚠️  REPLACE THIS with your actual key from https://dashboard.razorpay.com
   // Test key starts with  rzp_test_...
   // Live key starts with  rzp_live_...
-  static const _razorpayKey = 'rzp_test_SgPncJRwvqi1Vg';
+  static const _razorpayKey = 'rzp_test_SrwAwq325gG7Is';
 
   // Tracks whether Razorpay sheet is open so lifecycle resume can reset spinner
   bool _razorpayOpen = false;
@@ -1666,7 +1666,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                             TileLayer(
                               urlTemplate:
                                   'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                              userAgentPackageName: 'com.example.loginpage',
+                              userAgentPackageName: 'com.foodfeast.app',
                             ),
                             MarkerLayer(markers: [
                               Marker(
