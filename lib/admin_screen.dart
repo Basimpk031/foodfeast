@@ -5230,7 +5230,10 @@ class _SupportListState extends State<_SupportList> {
                         color: color, size: 18),
                     ),
                     title: Text(
-                      data[widget.titleField] as String? ?? '—',
+                      data[widget.titleField] as String? ??
+                      data['refundReason']    as String? ??
+                      data['category']        as String? ??
+                      data['subject']         as String? ?? '—',
                       style: const TextStyle(
                           fontSize: 13.5, fontWeight: FontWeight.w700,
                           color: Color(0xFF1C1C1E)),

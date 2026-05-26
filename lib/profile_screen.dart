@@ -36,7 +36,7 @@ class ProfileScreenState extends State<ProfileScreen>
 
   Map<String, dynamic> _userData = {};
   bool _isLoading  = true;
-  int  _orderCount = 0;
+  late final Stream<int> _orderCountStream;
 
   // ── Count-up animation ───────────────────────
   late AnimationController _countUpCtrl;
@@ -58,7 +58,17 @@ class ProfileScreenState extends State<ProfileScreen>
         CurvedAnimation(parent: _countUpCtrl, curve: Curves.easeOutCubic);
     _countUpCtrl.forward();
     _loadUser();
-    _loadOrderCount();
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      _orderCountStream = FirebaseFirestore.instance
+          .collection('orders')
+          .where('userId', isEqualTo: user.uid)
+          .snapshots()
+          .map((snap) => snap.docs.length)
+          .distinct();
+    } else {
+      _orderCountStream = Stream.value(0);
+    }
   }
 
   @override
@@ -102,16 +112,6 @@ class ProfileScreenState extends State<ProfileScreen>
         });
       }
     }
-  }
-
-  Future<void> _loadOrderCount() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    final snap = await FirebaseFirestore.instance
-        .collection('orders')
-        .where('userId', isEqualTo: user.uid)
-        .get();
-    if (mounted) setState(() => _orderCount = snap.docs.length);
   }
 
   String _getInitials(String name) {
@@ -428,7 +428,7 @@ class ProfileScreenState extends State<ProfileScreen>
         const SizedBox(height: 16),
         _buildActionsCard(name, email),
         const SizedBox(height: 24),
-        Text('FoodFeast v1.0.0',
+        Text('FoodFeast v1.0.2',
             style: TextStyle(fontSize: 12, color: Colors.grey[400])),
         const SizedBox(height: 20),
       ]),
@@ -529,7 +529,11 @@ class ProfileScreenState extends State<ProfileScreen>
         child: IntrinsicHeight(
           child: Row(children: [
             // ── Orders ──────────────────────────────
-            Expanded(
+            StreamBuilder<int>(
+              stream: _orderCountStream,
+              builder: (context, snap) {
+                final orderCount = snap.data ?? 0;
+                return Expanded(
               child: GestureDetector(
                 onTap: _openOrderHistory,
                 behavior: HitTestBehavior.opaque,
@@ -539,7 +543,7 @@ class ProfileScreenState extends State<ProfileScreen>
                     const Icon(Icons.receipt_long_outlined,
                         size: 20, color: _red),
                     const SizedBox(height: 4),
-                    Text('$_orderCount',
+                    Text('$orderCount',
                         style: const TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.w800,
@@ -564,6 +568,8 @@ class ProfileScreenState extends State<ProfileScreen>
                   ]),
                 ),
               ),
+            );
+              },
             ),
 
             _vDivider(),
