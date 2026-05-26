@@ -607,7 +607,9 @@ class _DeliveryAgentDashboardState extends State<DeliveryAgentDashboard> {
   // ── Mark delivered + update earnings ─────────────────────────────────────
   Future<void> _markDelivered(Map<String, dynamic> order) async {
     final id     = order['id'] as String;
-    final amount = (order['deliveryFee'] as num? ?? 30).toDouble();
+    // Agent always earns at least ₹30 — even when delivery is free for the customer.
+    final rawFee = (order['deliveryFee'] as num? ?? 0).toDouble();
+    final amount = rawFee > 0 ? rawFee : 30.0;
 
     final batch = FirebaseFirestore.instance.batch();
 
@@ -1328,7 +1330,7 @@ class _DeliveryAgentDashboardState extends State<DeliveryAgentDashboard> {
               borderRadius: BorderRadius.circular(8),
             ),
             child: Text(
-              '₹${(order['deliveryFee'] as num? ?? 30).toStringAsFixed(0)}',
+              '₹${((order['deliveryFee'] as num? ?? 0) > 0 ? (order['deliveryFee'] as num).toDouble() : 30.0).toStringAsFixed(0)}',
               style: const TextStyle(
                   fontSize: 13,
                   color: _kOrange,
