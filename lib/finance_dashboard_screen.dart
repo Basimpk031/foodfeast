@@ -196,10 +196,21 @@ class _FinanceDashboardScreenState extends State<FinanceDashboardScreen> {
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
-  bool _inPeriod(Map<String, dynamic> order, Period period) {
+  // [FIX] useDeliveredAt: agent earnings must be bucketed by when the order
+  // was delivered, not when it was placed. An order placed yesterday and
+  // delivered today must appear in "Today". Falls back to createdAt if
+  // deliveredAt is absent.
+  bool _inPeriod(Map<String, dynamic> order, Period period,
+      {bool useDeliveredAt = false}) {
     final start = period.startDate;
     if (start == null) return true;
-    final ts = order['createdAt'] as Timestamp?;
+    Timestamp? ts;
+    if (useDeliveredAt) {
+      ts = order['deliveredAt'] as Timestamp? ??
+           order['createdAt']   as Timestamp?;
+    } else {
+      ts = order['createdAt'] as Timestamp?;
+    }
     if (ts == null) return false;
     return ts.toDate().isAfter(start);
   }
@@ -209,7 +220,11 @@ class _FinanceDashboardScreenState extends State<FinanceDashboardScreen> {
     final filtered = _allOrders.where((o) {
       final method = (o['paymentMethod'] as String? ?? '').toLowerCase();
       final status = (o['paymentStatus'] as String? ?? '').toLowerCase();
-      final isCod  = method == 'cod' || status == 'cod' || status == 'pending_cod';
+      // [FIX] Broaden COD detection — field values vary ('COD', 'Cash on Delivery',
+      // 'cash', 'pending', 'pending_cod', etc).
+      final isCod  = method.contains('cod')  || method.contains('cash') ||
+                     status.contains('cod')  || status.contains('cash') ||
+                     status.contains('pending');
       return isCod && _inPeriod(o, _codPeriod);
     }).toList();
 
@@ -283,7 +298,11 @@ class _FinanceDashboardScreenState extends State<FinanceDashboardScreen> {
     for (final order in deliveredOrders) {
       final agentId   = order['assignedAgentId'] as String;
       final agentName = order['agentName'] as String? ?? 'Agent';
-      final fee       = (order['deliveryFee'] as num? ?? 30).toDouble();
+      // [FIX] Read deliveryFee properly; fall back to 30 only when truly absent.
+      final rawFee = order['deliveryFee'];
+      final fee    = (rawFee is num && rawFee > 0)
+          ? rawFee.toDouble()
+          : 30.0;
 
       map.putIfAbsent(agentId, () => {
         'name':     agentName,
@@ -292,7 +311,8 @@ class _FinanceDashboardScreenState extends State<FinanceDashboardScreen> {
       });
 
       for (final p in Period.values) {
-        if (_inPeriod(order, p)) {
+        // [FIX] useDeliveredAt: bucket by delivery time, not order creation time.
+        if (_inPeriod(order, p, useDeliveredAt: true)) {
           (map[agentId]!['earnings'] as Map<Period, double>)[p] =
               (map[agentId]!['earnings'] as Map<Period, double>)[p]! + fee;
           (map[agentId]!['counts'] as Map<Period, int>)[p] =

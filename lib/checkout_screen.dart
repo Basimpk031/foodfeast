@@ -169,6 +169,13 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   AppLocation? _deliveryLocation;
   bool _fetchingLocation = false;
 
+  // Cached restaurant reference lat/lng used for the 7 km delivery radius
+  // check. Populated once in initState from payload items or Firestore so
+  // that _distanceOfAddress always measures restaurant → door, never
+  // phone-GPS → door.
+  double? _restaurantRefLat;
+  double? _restaurantRefLng;
+
   /// Auto-fill address from GPS / map pick
   Future<void> _useMyLocation({bool fromMap = false}) async {
     AppLocation? loc;
@@ -275,6 +282,11 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         i: (widget.payload.items[i]['quantity'] as num? ?? 1).toInt()
     };
 
+
+    // ── Pre-load restaurant reference location for 7 km radius check ────
+    // This ensures _distanceOfAddress always measures restaurant → door,
+    // even when cart/bundle items do not carry an embedded restaurantLocation.
+    _loadRestaurantRefLocation();
     // ── Auto-apply promo from Offers section ────────────────────────────
     if (widget.initialPromoCode != null &&
         widget.initialPromoCode!.isNotEmpty) {
@@ -762,25 +774,96 @@ class _CheckoutScreenState extends State<CheckoutScreen>
     }
   }
 
+  // ── Restaurant reference location loader ──────────────────────────
+  /// Populates [_restaurantRefLat] / [_restaurantRefLng] exactly once.
+  ///
+  /// Priority:
+  ///   1. `restaurantLocation` embedded in any payload item (fastest — no Firestore read).
+  ///   2. Fetch `location` from `restaurants/{restaurantId}` in Firestore.
+  ///
+  /// The phone's live GPS is intentionally NOT used as a fallback, because
+  /// that was the root cause of the bypass: the check became
+  /// "how far is the delivery address from the user's phone?" which is always
+  /// ~0 km when the user is filling in checkout at their current location.
+  Future<void> _loadRestaurantRefLocation() async {
+    // 1. Try embedded restaurantLocation on any item.
+    for (final item in widget.payload.items) {
+      final locMap = item['restaurantLocation'] as Map<String, dynamic>?;
+      if (locMap != null) {
+        final lat = (locMap['lat'] as num?)?.toDouble();
+        final lng = (locMap['lng'] as num?)?.toDouble();
+        if (lat != null && lng != null) {
+          if (mounted) setState(() { _restaurantRefLat = lat; _restaurantRefLng = lng; });
+          return;
+        }
+      }
+    }
+
+    // 2. Fetch from Firestore using payload.restaurantId (or first item's restaurantId).
+    final rId = (widget.payload.restaurantId?.isNotEmpty == true)
+        ? widget.payload.restaurantId!
+        : widget.payload.items
+            .map((i) => i['restaurantId'] as String? ?? '')
+            .firstWhere((id) => id.isNotEmpty, orElse: () => '');
+
+    if (rId.isEmpty) return; // No restaurant ID at all — can't enforce radius.
+
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('restaurants')
+          .doc(rId)
+          .get();
+      final locMap = doc.data()?['location'] as Map<String, dynamic>?;
+      final lat = (locMap?['lat'] as num?)?.toDouble();
+      final lng = (locMap?['lng'] as num?)?.toDouble();
+      if (lat != null && lng != null && mounted) {
+        setState(() { _restaurantRefLat = lat; _restaurantRefLng = lng; });
+      }
+    } catch (e) {
+      debugPrint('[Checkout] _loadRestaurantRefLocation failed for $rId: $e');
+    }
+  }
+
   // ── 7 km delivery radius check ────────────────────────────────────
-  /// Returns the Haversine distance (km) between a saved address and the
-  /// user's current GPS fix. Returns null if either coordinate is missing.
+  /// Returns the Haversine distance (km) between a delivery address and the
+  /// restaurant reference point ([_restaurantRefLat] / [_restaurantRefLng]).
+  ///
+  /// Returns `null` only if the restaurant location could not be resolved
+  /// (Firestore fetch failed AND no embedded location).  In that case the
+  /// caller skips the radius guard — consistent with the "fail open" policy
+  /// used elsewhere.
+  ///
+  /// ⚠️  We intentionally do NOT fall back to [LocationService.instance.current]
+  /// (the phone GPS) here.  Using the phone's live GPS as the reference makes
+  /// the check measure "delivery address vs phone location", which is always
+  /// ~0 km when the user is typing at their current location — completely
+  /// defeating the 7 km restaurant delivery radius.
   double? _distanceOfAddress(Map<String, dynamic> addr) {
     final addrLat = (addr['lat'] as num?)?.toDouble();
     final addrLng = (addr['lng'] as num?)?.toDouble();
     if (addrLat == null || addrLng == null) return null;
-    final ref = LocationService.instance.current;
-    if (ref == null) return null;
+
+    // Use the pre-loaded restaurant reference location.
+    final refLat = _restaurantRefLat;
+    final refLng = _restaurantRefLng;
+
+    // Reference not yet loaded or unavailable — skip the guard (fail open).
+    if (refLat == null || refLng == null) return null;
 
     const R = 6371.0;
-    final dLat = (addrLat - ref.lat) * (pi / 180);
-    final dLng = (addrLng - ref.lng) * (pi / 180);
+    final dLat = (addrLat - refLat) * (pi / 180);
+    final dLng = (addrLng - refLng) * (pi / 180);
     final a = sin(dLat / 2) * sin(dLat / 2) +
-        cos(ref.lat * pi / 180) *
+        cos(refLat * pi / 180) *
             cos(addrLat * pi / 180) *
             sin(dLng / 2) *
             sin(dLng / 2);
     return R * 2 * atan2(sqrt(a), sqrt(1 - a));
+  }
+
+  /// Distance (km) between a GPS-picked [AppLocation] and the restaurant.
+  double? _distanceOfLocation(AppLocation loc) {
+    return _distanceOfAddress({'lat': loc.lat, 'lng': loc.lng});
   }
 
   bool _validate() {
@@ -802,6 +885,16 @@ class _CheckoutScreenState extends State<CheckoutScreen>
             _snack(
               'Please pin your location on the map so the agent can find you.',
               _orange,
+            );
+            return false;
+          }
+          // ── 7 km radius guard for GPS-picked / new address ─────────────
+          final distNew = _distanceOfLocation(_deliveryLocation!);
+          if (distNew != null && distNew > 7.0) {
+            _snack(
+              'Your delivery location is ${distNew.toStringAsFixed(1)} km away — '
+              'we only deliver within 7 km of the restaurant.',
+              _red,
             );
             return false;
           }
@@ -1427,10 +1520,15 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                           borderRadius: BorderRadius.circular(14)),
                       elevation: 0),
                   onPressed: () {
-                    Navigator.of(context).pop();
-                    Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) => OrderTrackingScreen(orderId: orderId),
-                    ));
+                    // Pop the success dialog + the entire CheckoutScreen so
+                    // pressing Back from OrderTracking goes to Home (or the
+                    // screen that launched checkout), not back to checkout.
+                    Navigator.of(context).pushAndRemoveUntil(
+                      MaterialPageRoute(
+                        builder: (_) => OrderTrackingScreen(orderId: orderId),
+                      ),
+                      (route) => route.isFirst,
+                    );
                   },
                   icon: const Icon(Icons.location_on_rounded,
                       color: Colors.white, size: 18),
@@ -1821,31 +1919,98 @@ class _CheckoutScreenState extends State<CheckoutScreen>
             // Show confirmed location badge if set
             if (_deliveryLocation != null) ...[
               const SizedBox(height: 10),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: _green.withOpacity(0.07),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                      color: _green.withOpacity(0.3), width: 1),
-                ),
-                child: Row(children: [
-                  const Icon(Icons.check_circle_rounded,
-                      color: _green, size: 16),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      '📍 ${_deliveryLocation!.shortName}',
-                      style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF1C1C1E)),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+              Builder(builder: (_) {
+                final dist = _distanceOfLocation(_deliveryLocation!);
+                final tooFar = dist != null && dist > 7.0;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: tooFar
+                            ? _red.withOpacity(0.06)
+                            : _green.withOpacity(0.07),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                            color: tooFar
+                                ? _red.withOpacity(0.3)
+                                : _green.withOpacity(0.3),
+                            width: 1),
+                      ),
+                      child: Row(children: [
+                        Icon(
+                          tooFar
+                              ? Icons.location_off_rounded
+                              : Icons.check_circle_rounded,
+                          color: tooFar ? _red : _green,
+                          size: 16,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '📍 ${_deliveryLocation!.shortName}',
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: tooFar
+                                        ? _red
+                                        : const Color(0xFF1C1C1E)),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              if (dist != null) ...[
+                                const SizedBox(height: 2),
+                                Text(
+                                  tooFar
+                                      ? '${dist.toStringAsFixed(1)} km — outside delivery range (max 7 km)'
+                                      : '${dist.toStringAsFixed(1)} km from restaurant — in range ✓',
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: tooFar ? _red : _green,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ]),
                     ),
-                  ),
-                ]),
-              ),
+                    if (tooFar) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 7),
+                        decoration: BoxDecoration(
+                          color: _orange.withOpacity(0.06),
+                          borderRadius: BorderRadius.circular(8),
+                          border:
+                              Border.all(color: _orange.withOpacity(0.3)),
+                        ),
+                        child: const Row(children: [
+                          Icon(Icons.info_outline_rounded,
+                              color: _orange, size: 14),
+                          SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              'Choose a location closer to the restaurant, '
+                              'or update your delivery address on the home screen.',
+                              style: TextStyle(
+                                  fontSize: 10.5,
+                                  color: _orange,
+                                  fontWeight: FontWeight.w500),
+                            ),
+                          ),
+                        ]),
+                      ),
+                    ],
+                  ],
+                );
+              }),
             ],
             const SizedBox(height: 14),
             // ── Address type chips ──────────────────────────

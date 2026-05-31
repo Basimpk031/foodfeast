@@ -399,6 +399,37 @@ class FcmService {
     'cancelled':        'Your order has been cancelled.',
   };
 
+  // ── Human-readable descriptions shown in the detail sheet ─────────────────
+  static const _statusDescriptions = {
+    'pending':
+        'Your order has been successfully placed and is waiting for the restaurant to accept it. '
+        'This usually takes just a minute or two. You\'ll get notified the moment they confirm!',
+    'confirmed':
+        'Great news — the restaurant has accepted your order! '
+        'They\'ll start preparing your food very soon. Sit tight and get ready to enjoy.',
+    'preparing':
+        'The kitchen is hard at work preparing your meal fresh just for you. '
+        'This is where the magic happens! You\'ll be notified once your order is ready for pickup.',
+    'ready_for_pickup':
+        'Your order is packed and ready to go! '
+        'We\'re now assigning a nearby delivery agent to pick it up. '
+        'Delivery is just around the corner.',
+    'picked_up':
+        'A delivery agent has collected your order and is heading your way. '
+        'You can track the live location of your delivery from the order details screen.',
+    'out_for_delivery':
+        'Your food is on the move! Your delivery agent is en route to your location. '
+        'Make sure you\'re available to receive it. Expected arrival is very soon.',
+    'delivered':
+        'Your order has been successfully delivered to your doorstep. '
+        'We hope you enjoy your meal! '
+        'If you have any issues, you can raise a support ticket from the Help & Support section.',
+    'cancelled':
+        'Unfortunately your order has been cancelled. '
+        'If any payment was made, a refund will be initiated within 5–7 business days. '
+        'Please contact support if you have any questions.',
+  };
+
   static Future<void> sendOrderStatusNotification({
     required String customerId,
     required String orderId,
@@ -442,6 +473,7 @@ class FcmService {
         orderId: orderId,
         type: 'order_status',
         status: status,
+        description: _statusDescriptions[status],
       );
 
       debugPrint('[FCM] ✅ Status notification sent: $status → userId=$customerId');
@@ -489,6 +521,10 @@ class FcmService {
         body: body,
         orderId: orderId,
         type: 'agent_proximity',
+        description: etaMinutes <= 1
+            ? 'Your delivery agent has arrived at your location! Please be ready to collect your order.'
+            : 'Your delivery agent is only about $etaMinutes minutes away from your location. '
+              'Please make sure you are available to receive the delivery.',
       );
 
       debugPrint('[FCM] ✅ Proximity alert sent → userId=$customerId eta=${etaMinutes}min');
@@ -511,17 +547,20 @@ class FcmService {
     String? orderId,
     String? type,
     String? status,
+    String? description,
   }) async {
     try {
       final doc = {
-        'targetUid':  userId,
-        'title':      title,
-        'body':       body,
-        'type':       type ?? 'admin_reply',
-        'ticketId':   ticketId ?? '',
-        'collection': collection ?? 'support_tickets',
-        'sentAt':     FieldValue.serverTimestamp(),
-        'read':       false,
+        'targetUid':   userId,
+        'title':       title,
+        'body':        body,
+        'type':        type ?? 'admin_reply',
+        'ticketId':    ticketId ?? '',
+        'collection':  collection ?? 'support_tickets',
+        'sentAt':      FieldValue.serverTimestamp(),
+        'read':        false,
+        if (description != null && description.isNotEmpty)
+          'description': description,
       };
       if (orderId != null) doc['orderId'] = orderId;
       if (status  != null) doc['orderStatus'] = status;

@@ -15,6 +15,7 @@
 // FIX 4 — Overweight/Obese BMI penalties raised
 // FIX 5 — Budget-proximity scoring replaces absolute thresholds
 // NEW   — Daily macro-goal gap scoring
+// NEW   — Context-aware empty states (no restaurants / no matches / no profile)
 //
 // UI CHANGE — Card size reduced:
 //   SizedBox height (list):  330 → 260
@@ -30,6 +31,11 @@ import 'cart_provider.dart';
 import 'location_filter.dart';
 import 'location_service.dart';
 import 'portion_sheet.dart';
+
+// ───────────────────────────────────────────────────────────────────
+// Why the recommendations list is empty
+// ───────────────────────────────────────────────────────────────────
+enum _EmptyReason { noRestaurants, noProfile, noMatches }
 
 // ───────────────────────────────────────────────────────────────────
 // Data model returned to the UI
@@ -149,6 +155,9 @@ class FoodRecommendationEngine {
   DateTime? _cacheTime;
   static const _cacheTtl = Duration(minutes: 10);
 
+  // Tracks why the last fetch returned an empty list
+  _EmptyReason _lastEmptyReason = _EmptyReason.noProfile;
+
   bool get hasCachedResults =>
       _cache.isNotEmpty &&
       _cacheTime != null &&
@@ -196,6 +205,18 @@ class FoodRecommendationEngine {
           .collection('restaurants')
           .get();
 
+      // ── Check whether ANY nearby active restaurant exists ──────────
+      final nearbyExists = restaurantsSnap.docs.any((d) {
+        final data = d.data() as Map<String, dynamic>;
+        return isRestaurantNearby(data) && (data['isActive'] ?? true);
+      });
+      if (!nearbyExists) {
+        _lastEmptyReason = _EmptyReason.noRestaurants;
+        _cache = [];
+        _cacheTime = DateTime.now();
+        return [];
+      }
+
       final candidates = await _runHybridEngine(
         userData: userData,
         orderDocs: ordersSnap.docs,
@@ -210,6 +231,18 @@ class FoodRecommendationEngine {
         final key = '${c.restaurantId}__${(c.item['name'] ?? '')}';
         if (seen.add(key)) unique.add(c);
         if (unique.length >= limit) break;
+      }
+
+      // ── Determine empty reason when no candidates surfaced ─────────
+      if (unique.isEmpty) {
+        // Nearby restaurants exist but nothing matched — likely incomplete
+        // profile (no height/weight/dietPreferences set) or very restrictive
+        // calorie budget.
+        final hasProfileData =
+            (userData['weight'] != null) &&
+            (userData['height'] != null);
+        _lastEmptyReason =
+            hasProfileData ? _EmptyReason.noMatches : _EmptyReason.noProfile;
       }
 
       _cache = unique.map(_toRecommendation).toList();
@@ -899,6 +932,7 @@ class _AiRecommendationSectionState
   bool _expanded = true;
   bool _caloriesExceeded    = false;
   bool _ignoreCalorieLimit  = false;
+  _EmptyReason _emptyReason = _EmptyReason.noProfile;
 
   @override
   void initState() {
@@ -932,10 +966,11 @@ class _AiRecommendationSectionState
           CalorieTracker.instance.consumedCalories >=
               CalorieTracker.instance.goalCalories;
       setState(() {
-        _recs              = recs;
-        _loading           = false;
-        _caloriesExceeded  = exceeded && !ignoreLimit;
+        _recs               = recs;
+        _loading            = false;
+        _caloriesExceeded   = exceeded && !ignoreLimit;
         _ignoreCalorieLimit = ignoreLimit;
+        _emptyReason        = FoodRecommendationEngine.instance._lastEmptyReason;
       });
     }
   }
@@ -1047,10 +1082,12 @@ class _AiRecommendationSectionState
             )
           else if (_recs.isEmpty)
             _EmptyRecommendations(
-                onRetry: () => _load(force: true))
+              reason: _emptyReason,
+              onRetry: () => _load(force: true),
+            )
           else
             SizedBox(
-              height: 260, // ← reduced from 330
+              height: 260,
               child: ListView.builder(
                 padding:
                     const EdgeInsets.fromLTRB(16, 0, 16, 0),
@@ -1216,7 +1253,7 @@ class _RecommendationCard extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        width: 160, // ← reduced from 180
+        width: 160,
         margin:
             const EdgeInsets.only(right: 14, bottom: 4, top: 4),
         decoration: BoxDecoration(
@@ -1238,7 +1275,7 @@ class _RecommendationCard extends StatelessWidget {
               borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(20)),
               child: SizedBox(
-                height: 105, // ← reduced from 130
+                height: 105,
                 width: double.infinity,
                 child: Stack(
                   fit: StackFit.expand,
@@ -1794,13 +1831,45 @@ class _CalorieExceededBanner extends StatelessWidget {
 // ── Empty state ─────────────────────────────────────────────────────
 class _EmptyRecommendations extends StatelessWidget {
   final VoidCallback onRetry;
-  const _EmptyRecommendations({required this.onRetry});
+  final _EmptyReason reason;
+
+  const _EmptyRecommendations({
+    required this.onRetry,
+    required this.reason,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final String emoji;
+    final String title;
+    final String subtitle;
+    final bool showRetry;
+
+    switch (reason) {
+      case _EmptyReason.noRestaurants:
+        emoji     = '📍';
+        title     = 'No restaurants in your area yet';
+        subtitle  = 'We\'re working on expanding to your area. Check back soon!';
+        showRetry = false;
+        break;
+      case _EmptyReason.noMatches:
+        emoji     = '🔍';
+        title     = 'No matches for your preferences';
+        subtitle  = 'Try adjusting your diet or calorie settings for more options.';
+        showRetry = true;
+        break;
+      case _EmptyReason.noProfile:
+      default:
+        emoji     = '🤖';
+        title     = 'Complete your profile for AI picks!';
+        subtitle  = 'Add your weight, height & diet preference';
+        showRetry = true;
+        break;
+    }
+
     return Container(
-      height: 160,
       margin: const EdgeInsets.symmetric(horizontal: 20),
+      padding: const EdgeInsets.fromLTRB(20, 22, 20, 22),
       decoration: BoxDecoration(
         color: const Color(0xFFF7F7F7),
         borderRadius: BorderRadius.circular(16),
@@ -1809,39 +1878,42 @@ class _EmptyRecommendations extends StatelessWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Text('🤖',
-              style: TextStyle(fontSize: 36)),
+          Text(emoji, style: const TextStyle(fontSize: 36)),
           const SizedBox(height: 10),
-          const Text(
-            'Complete your profile for AI picks!',
-            style: TextStyle(
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w700,
                 color: Color(0xFF1C1C1E)),
           ),
           const SizedBox(height: 4),
-          const Text(
-            'Add your weight, height & diet preference',
-            style: TextStyle(
+          Text(
+            subtitle,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
                 fontSize: 12, color: Color(0xFF6E6E73)),
           ),
-          const SizedBox(height: 12),
-          GestureDetector(
-            onTap: onRetry,
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0077B6),
-                borderRadius: BorderRadius.circular(10),
+          if (showRetry) ...[
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: onRetry,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0077B6),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Text('Try Again',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700)),
               ),
-              child: const Text('Try Again',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700)),
             ),
-          ),
+          ],
         ],
       ),
     );

@@ -65,3 +65,59 @@ String formatDistance(double km) {
   if (km < 1) return '${(km * 1000).round()} m';
   return '${km.toStringAsFixed(1)} km';
 }
+
+// ─────────────────────────────────────────────
+// Bundle location gate
+// ─────────────────────────────────────────────
+
+/// Result of a bundle location check.
+class BundleLocationResult {
+  /// True when every restaurant in the bundle is within [radiusKm].
+  final bool isOrderable;
+
+  /// Names of restaurants that are too far away (empty when [isOrderable] is true).
+  final List<String> outOfRangeRestaurantNames;
+
+  const BundleLocationResult({
+    required this.isOrderable,
+    required this.outOfRangeRestaurantNames,
+  });
+}
+
+/// Checks whether every restaurant referenced by the bundle items is within
+/// [radiusKm] of the user's current location.
+///
+/// [restaurantLocations] is a map of `restaurantId → {'lat': double, 'lng': double}`.
+/// Pass the data you already cached in `_allItems` so there's no extra Firestore read.
+///
+/// If the user's location is unknown, returns `isOrderable: true` (fail-open,
+/// consistent with [isRestaurantNearby]).
+BundleLocationResult checkBundleLocation(
+  /// Map of restaurantId → location map (must contain 'lat' and 'lng').
+  Map<String, Map<String, dynamic>?> restaurantLocations, {
+  double radiusKm = kDefaultRadiusKm,
+}) {
+  final userLoc = LocationService.instance.current;
+  if (userLoc == null) {
+    // Location unknown — fail open (same policy as isRestaurantNearby).
+    return const BundleLocationResult(
+        isOrderable: true, outOfRangeRestaurantNames: []);
+  }
+
+  final List<String> outOfRange = [];
+
+  for (final entry in restaurantLocations.entries) {
+    final locMap = entry.value;
+    if (locMap == null) continue; // no location stored → skip (fail open)
+
+    final restData = <String, dynamic>{'location': locMap};
+    if (!isRestaurantNearby(restData, radiusKm: radiusKm)) {
+      outOfRange.add(entry.key); // key is restaurantId; caller maps to name
+    }
+  }
+
+  return BundleLocationResult(
+    isOrderable: outOfRange.isEmpty,
+    outOfRangeRestaurantNames: outOfRange,
+  );
+}

@@ -74,6 +74,11 @@ class BundleItem {
   final bool isItemAvailable;
   final bool isRestaurantActive;
 
+  // ── Location (used for out-of-range check in MyBundles) ───────────────────
+  /// Firestore `location` map for the restaurant this item belongs to.
+  /// Shape: {'lat': double, 'lng': double}.  May be null if not stored.
+  final Map<String, dynamic>? restaurantLocation;
+
   // ── Portion support ───────────────────────────
   final Map<String, double> portionPrices;
   final Map<String, PortionNutrition> portionNutrition;
@@ -97,6 +102,7 @@ class BundleItem {
     this.quantity = 1,
     this.isItemAvailable = true,
     this.isRestaurantActive = true,
+    this.restaurantLocation,
     this.portionPrices = const {},
     this.portionNutrition = const {},
     this.selectedPortion,
@@ -125,6 +131,7 @@ class BundleItem {
         'carbs': carbs,
         'fat': fat,
         'quantity': quantity,
+        if (restaurantLocation != null) 'restaurantLocation': restaurantLocation,
       };
 
   factory BundleItem.fromMap(Map<String, dynamic> m) {
@@ -151,6 +158,7 @@ class BundleItem {
       fat: (m['fat'] ?? 0).toDouble(),
       quantity: (m['quantity'] ?? 1).toInt(),
       selectedPortion: sp,
+      restaurantLocation: m['restaurantLocation'] as Map<String, dynamic>?,
     );
   }
 
@@ -185,6 +193,47 @@ class SavedBundle {
   /// True when at least one item in this bundle is currently unavailable
   /// (admin deactivated item OR restaurant deactivated).
   bool get hasUnavailableItems => items.any((i) => !i.isAvailable);
+
+  /// Returns restaurant names whose location is outside [radiusKm] from the
+  /// user's current position.  Uses the [restaurantLocation] stored on each
+  /// [BundleItem] (populated when the bundle is built / ordered).
+  /// Falls back to the live [_allItems] cache via the optional [locationLookup]
+  /// so that bundles saved before this field existed still work.
+  List<String> outOfRangeRestaurantNames({
+    double radiusKm = kDefaultRadiusKm,
+    /// Optional override: restaurantId → location map, for bundles whose items
+    /// were saved before restaurantLocation was added to BundleItem.
+    Map<String, Map<String, dynamic>?>? locationLookup,
+  }) {
+    final userLoc = LocationService.instance.current;
+    if (userLoc == null) return []; // location unknown → fail open
+
+    // Collect unique restaurants and their location maps.
+    final Map<String, String> idToName = {};         // restaurantId → name
+    final Map<String, Map<String, dynamic>?> idToLoc = {}; // restaurantId → loc
+
+    for (final item in items) {
+      idToName[item.restaurantId] = item.restaurantName;
+      idToLoc[item.restaurantId] ??=
+          item.restaurantLocation ??            // preferred: stored on item
+          locationLookup?[item.restaurantId];   // fallback: live cache
+    }
+
+    final result = checkBundleLocation(idToLoc, radiusKm: radiusKm);
+    // Map restaurantIds back to display names.
+    return result.outOfRangeRestaurantNames
+        .map((id) => idToName[id] ?? id)
+        .toList();
+  }
+
+  /// Convenience bool — true when every restaurant is within range.
+  bool isBundleOrderableAtLocation({
+    double radiusKm = kDefaultRadiusKm,
+    Map<String, Map<String, dynamic>?>? locationLookup,
+  }) =>
+      outOfRangeRestaurantNames(
+              radiusKm: radiusKm, locationLookup: locationLookup)
+          .isEmpty;
 
   factory SavedBundle.fromFirestore(DocumentSnapshot doc) {
     final d = doc.data() as Map<String, dynamic>;
@@ -229,16 +278,24 @@ class _BundleScreenState extends State<BundleScreen>
   bool _isSaving = false;
   final Set<String> _orderingBundleIds = {};
 
-  // All food items from Firestore
+  // All food items from Firestore (only nearby restaurants — for Build Bundle tab)
   List<Map<String, dynamic>> _allItems = [];
   List<String> _restaurantNames = ['All'];
   bool _loadingItems = true;
+
+  // ── Restaurant location cache for MyBundles tab ──────────────────────────
+  // Keyed by restaurantId. Populated by _loadAllRestaurantLocations() which
+  // fetches ALL restaurants (no radius filter) so old bundles whose restaurants
+  // are far away still get their GPS coordinates for the out-of-range check.
+  Map<String, Map<String, dynamic>?> _allRestaurantLocations = {};
+  bool _loadingRestaurantLocations = false;
 
   @override
   void initState() {
     super.initState();
     _tabCtrl = TabController(length: 2, vsync: this);
     _loadAllFoodItems();
+    _loadAllRestaurantLocations(); // ← fetches locations for ALL restaurants
     // Re-fetch whenever user changes location
     LocationService.instance.addListener(_onLocationChanged);
   }
@@ -253,6 +310,50 @@ class _BundleScreenState extends State<BundleScreen>
 
   void _onLocationChanged() {
     _loadAllFoodItems();
+    // Rebuild MyBundles tab so out-of-range badges refresh
+    if (mounted) setState(() {});
+  }
+
+  /// Fetches GPS coords for EVERY restaurant (no radius filter).
+  /// This is a lightweight read — only the restaurant docs, no sub-collections.
+  /// Stored in [_allRestaurantLocations] and used by [_buildLocationLookup].
+  Future<void> _loadAllRestaurantLocations() async {
+    if (_loadingRestaurantLocations) return;
+    _loadingRestaurantLocations = true;
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('restaurants')
+          .get();
+      final map = <String, Map<String, dynamic>?>{};
+      for (final doc in snap.docs) {
+        final locMap = doc.data()['location'] as Map<String, dynamic>?;
+        map[doc.id] = locMap; // may be null if restaurant has no coords stored
+      }
+      if (mounted) setState(() => _allRestaurantLocations = map);
+    } catch (e) {
+      debugPrint('BundleScreen._loadAllRestaurantLocations error: $e');
+    } finally {
+      _loadingRestaurantLocations = false;
+    }
+  }
+
+  /// Builds a restaurantId → location map for use by [SavedBundle.outOfRangeRestaurantNames].
+  ///
+  /// Priority order:
+  ///   1. [_allRestaurantLocations] — fetched directly from Firestore, no radius
+  ///      filter, so restaurants that are far away are still included.
+  ///   2. [_allItems] — nearby-only cache, used as secondary for any gaps.
+  Map<String, Map<String, dynamic>?> _buildLocationLookup() {
+    // Start with the complete restaurant location map (all restaurants).
+    final map = Map<String, Map<String, dynamic>?>.from(_allRestaurantLocations);
+    // Fill any gaps from the _allItems nearby cache.
+    for (final item in _allItems) {
+      final id = item['restaurantId'] as String?;
+      if (id != null && !map.containsKey(id)) {
+        map[id] = item['restaurantLocation'] as Map<String, dynamic>?;
+      }
+    }
+    return map;
   }
 
   // ── Load all food items across restaurants ──
@@ -429,6 +530,7 @@ class _BundleScreenState extends State<BundleScreen>
         fat:                itemData['fat'],
         isItemAvailable:    itemData['isItemAvailable'] ?? true,
         isRestaurantActive: itemData['isRestaurantActive'] ?? true,
+        restaurantLocation: itemData['restaurantLocation'] as Map<String, dynamic>?,
         portionPrices:      portionPrices,
         portionNutrition:   (itemData['portionNutrition'] as Map<String, PortionNutrition>?) ?? {},
       );
@@ -551,6 +653,7 @@ class _BundleScreenState extends State<BundleScreen>
                         fat:                nutr.fat,
                         isItemAvailable:    itemData['isItemAvailable'] ?? true,
                         isRestaurantActive: itemData['isRestaurantActive'] ?? true,
+                        restaurantLocation: itemData['restaurantLocation'] as Map<String, dynamic>?,
                         portionPrices:      portionPrices,
                         portionNutrition:   portionNutrition,
                         selectedPortion:    selected,
@@ -725,6 +828,20 @@ class _BundleScreenState extends State<BundleScreen>
           .map((i) => i.name)
           .join(', ');
       _snack('Cannot order — unavailable items: $unavailableNames', _red);
+      return;
+    }
+
+    // ✅ Block order if any restaurant in the bundle is outside the user's radius
+    final outOfRange = bundle.outOfRangeRestaurantNames(
+      locationLookup: _buildLocationLookup(),
+    );
+    if (outOfRange.isNotEmpty) {
+      final names = outOfRange.join(', ');
+      _snack(
+        'Cannot order — restaurant${outOfRange.length > 1 ? 's are' : ' is'} '
+        'outside your delivery area: $names',
+        _red,
+      );
       return;
     }
 
@@ -2861,6 +2978,12 @@ class _BundleScreenState extends State<BundleScreen>
   Widget _buildSavedBundleCard(SavedBundle bundle) {
     final hasUnavailable = bundle.hasUnavailableItems;
 
+    // ── Location check ────────────────────────────────────────────────────────
+    final outOfRangeNames = bundle.outOfRangeRestaurantNames(
+      locationLookup: _buildLocationLookup(),
+    );
+    final isOutOfRange = outOfRangeNames.isNotEmpty;
+
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
       decoration: BoxDecoration(
@@ -2949,6 +3072,33 @@ class _BundleScreenState extends State<BundleScreen>
                 child: Text(
                   'Some items are currently unavailable. Ordering is disabled until they become available again.',
                   style: TextStyle(fontSize: 11, color: _red, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ]),
+          ),
+
+        // ✅ Out-of-range location warning banner
+        if (isOutOfRange)
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: _orange.withOpacity(0.07),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: _orange.withOpacity(0.35)),
+            ),
+            child: Row(children: [
+              const Icon(Icons.location_off_rounded, color: _orange, size: 16),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Delivery not available to your current location from: '
+                  '${outOfRangeNames.join(', ')}. '
+                  'Change your delivery address to order this bundle.',
+                  style: const TextStyle(
+                      fontSize: 11,
+                      color: _orange,
+                      fontWeight: FontWeight.w600),
                 ),
               ),
             ]),
@@ -3093,10 +3243,19 @@ class _BundleScreenState extends State<BundleScreen>
           ]),
         ),
 
-        // ✅ Order button — disabled when bundle has unavailable items or ordering in progress
+        // ✅ Order button — disabled when bundle has unavailable items, out-of-range restaurants, or ordering in progress
         Builder(builder: (context) {
           final isOrdering = _orderingBundleIds.contains(bundle.id);
-          final isDisabled = hasUnavailable || isOrdering;
+          final isDisabled = hasUnavailable || isOutOfRange || isOrdering;
+          // Determine button label priority: unavailable > out-of-range > normal
+          final String buttonLabel = hasUnavailable
+              ? '🚫  Unavailable Items'
+              : isOutOfRange
+                  ? '📍  Outside Delivery Area'
+                  : '🛒  Order Bundle';
+          final Color labelColor = isDisabled
+              ? const Color(0xFF9E9E9E)
+              : Colors.white;
           return Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
             child: SizedBox(
@@ -3120,22 +3279,16 @@ class _BundleScreenState extends State<BundleScreen>
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Text(
-                            hasUnavailable
-                                ? '🚫  Unavailable Items'
-                                : '🛒  Order Bundle',
+                            buttonLabel,
                             style: TextStyle(
-                                color: hasUnavailable
-                                    ? const Color(0xFF9E9E9E)
-                                    : Colors.white,
+                                color: labelColor,
                                 fontSize: 14,
                                 fontWeight: FontWeight.w700),
                           ),
                           const Spacer(),
                           Text('₹${bundle.totalPrice.toStringAsFixed(0)}',
                               style: TextStyle(
-                                  color: hasUnavailable
-                                      ? const Color(0xFF9E9E9E)
-                                      : Colors.white,
+                                  color: labelColor,
                                   fontSize: 15,
                                   fontWeight: FontWeight.w800)),
                         ]),
