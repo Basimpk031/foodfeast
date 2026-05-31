@@ -548,6 +548,11 @@ class FcmService {
     String? type,
     String? status,
     String? description,
+    // For coupon/promo notifications — pass the coupon's visualType
+    // (e.g. 'flash', 'flat', 'percent', 'free', 'welcome', 'birthday')
+    // so the notification card can render the matching offer animation.
+    String? couponVisualType,
+    String? linkedCoupon,
   }) async {
     try {
       final doc = {
@@ -561,6 +566,10 @@ class FcmService {
         'read':        false,
         if (description != null && description.isNotEmpty)
           'description': description,
+        if (couponVisualType != null && couponVisualType.isNotEmpty)
+          'couponVisualType': couponVisualType,
+        if (linkedCoupon != null && linkedCoupon.isNotEmpty)
+          'linkedCoupon': linkedCoupon,
       };
       if (orderId != null) doc['orderId'] = orderId;
       if (status  != null) doc['orderStatus'] = status;
