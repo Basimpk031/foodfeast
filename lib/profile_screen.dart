@@ -428,7 +428,7 @@ class ProfileScreenState extends State<ProfileScreen>
         const SizedBox(height: 16),
         _buildActionsCard(name, email),
         const SizedBox(height: 24),
-        Text('FoodFeast v1.0.2',
+        Text('FoodFeast v1.1.0',
             style: TextStyle(fontSize: 12, color: Colors.grey[400])),
         const SizedBox(height: 20),
       ]),
