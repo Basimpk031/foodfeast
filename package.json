@@ -2,5 +2,28 @@
   "dependencies": {
     "express": "^5.2.1",
     "firebase-admin": "^13.10.0"
-  }
+  },
+  "name": "foodfeast",
+  "version": "1.0.0",
+  "description": "A full-featured **food ordering mobile app** built with Flutter & Firebase. FoodFeast delivers a complete end-to-end food ordering experience — from browsing restaurants to real-time delivery tracking — powered by an AI recommendation engine.",
+  "main": "extractSchema.js",
+  "directories": {
+    "lib": "lib",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Basimpk031/foodfeast.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Basimpk031/foodfeast/issues"
+  },
+  "homepage": "https://github.com/Basimpk031/foodfeast#readme"
 }

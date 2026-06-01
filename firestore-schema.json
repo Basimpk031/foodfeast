@@ -1,14 +1,14 @@
 {
   "_debug_logs": {
     "msg": "string",
-    "time": "timestamp"
+    "time": "object"
   },
   "app_feedback": {
-    "userId": "string",
-    "userName": "string",
     "rating": "number",
     "comment": "string",
-    "createdAt": "timestamp"
+    "userName": "string",
+    "userId": "string",
+    "createdAt": "object"
   },
   "coupons": {
     "code": "string",
@@ -18,23 +18,14 @@
     "minOrder": "number",
     "description": "string",
     "isActive": "boolean",
-    "expiryDate": "timestamp",
+    "expiryDate": "object",
     "usageCount": "number",
-    "createdAt": "timestamp",
-    "updatedAt": "timestamp",
-    "maxDiscount": "number"
+    "createdAt": "object",
+    "updatedAt": "object"
   },
   "item_ratings": {
     "reviewCount": "number",
-    "averageRating": "number",
-    "__subcollection__reviews": {
-      "uid": "string",
-      "rating": "number",
-      "comment": "string",
-      "userName": "string",
-      "userPhotoUrl": "string",
-      "createdAt": "timestamp"
-    }
+    "averageRating": "number"
   },
   "notificationReads": {
     "LuPI7Tg6fQBxQEnZdbZm": "boolean",
@@ -67,31 +58,19 @@
     "Szx39QVv8DUVQq5jYPcV": "boolean",
     "hLIRfVuaDM4DrXYL8Gmd": "boolean",
     "C6dYN2b4IpBBsPgAtIcR": "boolean",
-    "JIluCmXPKshThzBDCHKb": "boolean",
-    "uAMGIo3srq8Tj5Xll2pq": "boolean",
-    "DLxB4WlYawCqZIkzPu1y": "boolean",
-    "E6agLN8vvWBvXKiDM1gc": "boolean",
-    "RZXvEZfGNXevNbzf2VlK": "boolean",
-    "Yhn767nR1jrb8mimRURs": "boolean",
-    "NhkTu33akcDEgYOX0tyE": "boolean",
-    "ZGbN257SFVXRz1qTR878": "boolean"
+    "JIluCmXPKshThzBDCHKb": "boolean"
   },
   "notifications": {
+    "read": "boolean",
+    "orderId": "string",
+    "orderStatus": "string",
+    "collection": "string",
     "targetUid": "string",
     "title": "string",
     "body": "string",
     "type": "string",
     "ticketId": "string",
-    "collection": "string",
-    "read": "boolean",
-    "orderId": "string",
-    "sentAt": "timestamp",
-    "linkedCoupon": "string",
-    "sentBy": "string",
-    "deliverySlot": "string",
-    "isRead": "boolean",
-    "restaurantId": "string",
-    "orderStatus": "string"
+    "sentAt": "object"
   },
   "orders": {
     "totalCarbs": "number",
@@ -112,23 +91,10 @@
     "paymentMethod": "string",
     "promoCode": "string",
     "promoDiscount": "number",
-    "items": "array<[object Object]>",
-    "createdAt": "timestamp",
+    "items": "object",
+    "createdAt": "object",
     "paymentStatus": "string",
-    "status": "string",
-    "total": "number",
-    "customerLat": "number",
-    "customerLng": "number",
-    "deliveryOtp": "string",
-    "perRestaurant": "array<[object Object]>",
-    "customerAddress": "string",
-    "restaurantIds": "array<string>",
-    "customerName": "string",
-    "restaurantLng": "number",
-    "restaurantLat": "number",
-    "restaurants": "array<[object Object]>",
-    "bundleId": "string",
-    "bundleName": "string"
+    "status": "string"
   },
   "problem_reports": {
     "userId": "string",
@@ -137,35 +103,21 @@
     "category": "string",
     "restaurantName": "string",
     "description": "string",
-    "createdAt": "timestamp",
-    "repliedAt": "timestamp",
+    "createdAt": "object",
+    "repliedAt": "object",
     "adminReply": "string",
-    "status": "string",
-    "__subcollection__messages": {
-      "sender": "string",
-      "text": "string",
-      "createdAt": "timestamp"
-    }
+    "status": "string"
   },
   "restaurant_ratings": {
     "reviewCount": "number",
-    "averageRating": "number",
-    "__subcollection__reviews": {
-      "uid": "string",
-      "rating": "number",
-      "comment": "string",
-      "userName": "string",
-      "userPhotoUrl": "string",
-      "createdAt": "timestamp",
-      "userId": "string"
-    }
+    "averageRating": "number"
   },
   "restaurants": {
     "priceForOne": "string",
     "discount": "string",
     "imageEmoji": "string",
     "isPromoted": "boolean",
-    "createdAt": "timestamp",
+    "createdAt": "object",
     "imageUrl": "string",
     "name": "string",
     "ownerUid": "string",
@@ -173,47 +125,10 @@
     "isActive": "boolean",
     "deliveryTime": "string",
     "rating": "number",
-    "location": {
-      "lat": "number",
-      "lng": "number",
-      "address": "string",
-      "shortName": "string"
-    },
-    "categories": "array<string>",
-    "updatedAt": "timestamp",
-    "ownerFcmToken": "string",
-    "__subcollection__menuItems": {
-      "isAvailable": "boolean",
-      "halfCalories": "number",
-      "fullCalories": "number",
-      "quarterCalories": "number",
-      "portionsEnabled": "boolean",
-      "description": "string",
-      "calories": "number",
-      "isVeg": "boolean",
-      "name": "string",
-      "createdAt": "timestamp",
-      "imageUrl": "string",
-      "quarterPrice": "number",
-      "originalPrice": "number",
-      "carbs": "number",
-      "halfFat": "number",
-      "fullFat": "number",
-      "fullPrice": "number",
-      "quarterFat": "number",
-      "fullCarbs": "number",
-      "fullProtein": "number",
-      "halfProtein": "number",
-      "price": "number",
-      "protein": "number",
-      "fat": "number",
-      "quarterCarbs": "number",
-      "category": "string",
-      "halfPrice": "number",
-      "halfCarbs": "number",
-      "quarterProtein": "number",
-      "updatedAt": "timestamp"
-    }
+    "location": "object",
+    "categories": "object",
+    "updatedAt": "object",
+    "ownerFcmToken": "string"
   },
   "support_messages": {
     "subject": "string",
@@ -223,14 +138,7 @@
     "userId": "string",
     "email": "string",
     "status": "string",
-    "createdAt": "timestamp",
-    "repliedAt": "timestamp",
-    "adminReply": "string",
-    "__subcollection__messages": {
-      "sender": "string",
-      "text": "string",
-      "createdAt": "timestamp"
-    }
+    "createdAt": "object"
   },
   "support_tickets": {
     "type": "string",
@@ -244,22 +152,13 @@
     "details": "string",
     "refundAccount": "string",
     "status": "string",
-    "createdAt": "timestamp",
-    "issueType": "string",
-    "description": "string",
-    "repliedAt": "timestamp",
-    "adminReply": "string",
-    "__subcollection__messages": {
-      "sender": "string",
-      "text": "string",
-      "createdAt": "timestamp"
-    }
+    "createdAt": "object"
   },
   "users": {
     "role": "string",
     "gender": "string",
     "goalCalories": "number",
-    "dietPreferences": "array<string>",
+    "dietPreferences": "object",
     "weight": "number",
     "photoUrl": "string",
     "uid": "string",
@@ -270,48 +169,7 @@
     "activityLevel": "string",
     "height": "number",
     "bmi": "number",
-    "createdAt": "timestamp",
-    "fcmToken": "string",
-    "__subcollection__favorites": {
-      "itemName": "string",
-      "isVeg": "boolean",
-      "restaurantName": "string",
-      "price": "number",
-      "imageUrl": "string",
-      "restaurantId": "string",
-      "savedAt": "timestamp"
-    },
-    "savedAddresses": "array<[object Object]>",
-    "__subcollection__bundles": {
-      "totalCarbs": "number",
-      "totalFat": "number",
-      "totalPrice": "number",
-      "totalProtein": "number",
-      "name": "string",
-      "totalCalories": "number",
-      "items": "array<[object Object]>",
-      "itemCount": "number",
-      "createdAt": "timestamp",
-      "updatedAt": "timestamp"
-    },
-    "__subcollection__calorieLogs": {
-      "date": "string",
-      "consumed": "number",
-      "carbs": "number",
-      "protein": "number",
-      "fat": "number",
-      "updatedAt": "timestamp"
-    },
-    "__subcollection__manualLogs": {
-      "date": "string",
-      "carbs": "number",
-      "protein": "number",
-      "fat": "number",
-      "label": "string",
-      "calories": "number",
-      "createdAt": "timestamp"
-    },
-    "restaurantId": "string",
-    "restaurantName": "string"
+    "createdAt": "object",
+    "fcmToken": "string"
   }
 }

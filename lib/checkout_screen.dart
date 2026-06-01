@@ -26,9 +26,10 @@
 //           on IEEE-754 rounding. We now round to 2 decimal places
 //           first, then multiply, ensuring the paise value is exact.
 //
-//   [FIX-4] _pendingOrderId null-guard (carried over from previous fix).
-//           _finaliseOrder captures the field into a local variable
-//           before any await to avoid race conditions.
+//   [FIX-4] _pendingOrderData null-guard.
+//           _finaliseOrder now writes the order doc to Firestore only
+//           after payment is confirmed. If _pendingOrderData is null,
+//           we abort safely with a support message.
 //
 //   [FIX-5] _onPaymentSuccess is kept sync (not async) so the Razorpay
 //           event system can call it without swallowing exceptions.
@@ -36,18 +37,30 @@
 //
 //   [FIX-6] dispose() now calls _razorpay.clear() only (no channel
 //           handler to remove), keeping teardown clean.
+//
+//   [FIX-7] Order written to Firestore ONLY after payment succeeds.
+//           Previously the order doc was created before Razorpay opened,
+//           meaning a user who closed the app mid-payment would leave a
+//           ghost "pending" order in Firestore that appeared placed but
+//           unpaid. Now _placeOrder() builds the full order map in memory
+//           (_pendingOrderData), opens Razorpay, and _finaliseOrder()
+//           writes to Firestore only on confirmed success (or COD path).
+//           _handlePaymentCancelled() simply clears _pendingOrderData —
+//           nothing was ever written, so no cleanup is needed.
 // ───────────────────────────────────────────────────────────────────
 
 import 'dart:math';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:razorpay_flutter/razorpay_flutter.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
-import 'cart_provider.dart';
+import 'package:razorpay_flutter/razorpay_flutter.dart';
+
 import 'calorie_tracker.dart';
+import 'cart_provider.dart';
 import 'fcm_service.dart';
 import 'location_service.dart';
 import 'order_tracking_screen.dart';
@@ -63,7 +76,7 @@ class CheckoutPayload {
   final double totalCarbs;
   final double totalFat;
   final String restaurantName;
-  final String? restaurantId; // [FIX] used to fetch GPS coords at order creation
+  final String? restaurantId;
   final String source;
   final String? bundleId;
   final String? bundleName;
@@ -90,7 +103,6 @@ class CheckoutScreen extends StatefulWidget {
   final CheckoutPayload payload;
   final VoidCallback? onOrderSuccess;
   /// When non-null, the code is pre-filled and auto-applied on page load.
-  /// Set by OffersSection when the user taps "Go to Checkout — Auto Apply".
   final String? initialPromoCode;
 
   const CheckoutScreen({
@@ -146,7 +158,13 @@ class _CheckoutScreenState extends State<CheckoutScreen>
 
   // State
   bool _placing = false;
-  String? _pendingOrderId;
+
+  // [FIX-7] Full order map built in memory before Razorpay opens.
+  // Written to Firestore only inside _finaliseOrder after payment succeeds.
+  // On cancellation / failure, simply set to null — nothing was written.
+  Map<String, dynamic>? _pendingOrderData;
+
+  // OTP generated in _placeOrder, shown in success dialog
   String? _pendingOtp;
 
   // Prefill data for Razorpay — populated in _placeOrder before .open()
@@ -159,24 +177,16 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   late Set<int> _myItems;
 
   // Per-item personal quantity in group mode
-  // Key = item index, Value = how many of that item I'm eating (0..item['quantity'])
   late Map<int, int> _myQuantities;
 
   // ── Location ──────────────────────────────────
-  // Stores the GPS-confirmed / map-picked delivery location.
-  // When set, its address is pre-filled into _addrCtrl and its
-  // lat/lng is saved alongside the order in Firestore.
   AppLocation? _deliveryLocation;
   bool _fetchingLocation = false;
 
-  // Cached restaurant reference lat/lng used for the 7 km delivery radius
-  // check. Populated once in initState from payload items or Firestore so
-  // that _distanceOfAddress always measures restaurant → door, never
-  // phone-GPS → door.
+  // Cached restaurant reference lat/lng for the 7 km delivery radius check.
   double? _restaurantRefLat;
   double? _restaurantRefLng;
 
-  /// Auto-fill address from GPS / map pick
   Future<void> _useMyLocation({bool fromMap = false}) async {
     AppLocation? loc;
     if (fromMap) {
@@ -202,10 +212,9 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       setState(() {
         _deliveryLocation = loc;
         _addrCtrl.text    = loc!.address;
-        // Attempt to parse pincode (last chunk of digits in address)
         final pin = RegExp(r'\b\d{6}\b').firstMatch(loc.address);
         if (pin != null) _pincodeCtrl.text = pin.group(0)!;
-        _selectedAddrIdx = -1; // switch to "new address" mode
+        _selectedAddrIdx = -1;
       });
     }
   }
@@ -213,7 +222,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   // ── Computed ──────────────────────────────────
   double get _subtotal => widget.payload.totalPrice;
 
-  // Personal nutrition sums — uses _myQuantities in group mode
   int get _myCalories {
     if (_orderingMode == 'personal') return widget.payload.totalCalories;
     return widget.payload.items.asMap().entries
@@ -261,12 +269,8 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   // [FIX-3] Round to 2dp before converting to paise to avoid IEEE-754 drift
   int get _grandPaise => (double.parse(_grand.toStringAsFixed(2)) * 100).round();
 
-  // ⚠️  REPLACE THIS with your actual key from https://dashboard.razorpay.com
-  // Test key starts with  rzp_test_...
-  // Live key starts with  rzp_live_...
-  static const _razorpayKey = 'rzp_test_SrwAwq325gG7Is';
+  static const _razorpayKey = 'rzp_test_SwESaAbdeQz5uX';
 
-  // Tracks whether Razorpay sheet is open so lifecycle resume can reset spinner
   bool _razorpayOpen = false;
 
   @override
@@ -281,52 +285,29 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       for (int i = 0; i < widget.payload.items.length; i++)
         i: (widget.payload.items[i]['quantity'] as num? ?? 1).toInt()
     };
-
-
-    // ── Pre-load restaurant reference location for 7 km radius check ────
-    // This ensures _distanceOfAddress always measures restaurant → door,
-    // even when cart/bundle items do not carry an embedded restaurantLocation.
     _loadRestaurantRefLocation();
-    // ── Auto-apply promo from Offers section ────────────────────────────
     if (widget.initialPromoCode != null &&
         widget.initialPromoCode!.isNotEmpty) {
       _promoCtrl.text = widget.initialPromoCode!;
-      // Short delay so the page has finished building before we call setState
       Future.delayed(const Duration(milliseconds: 500), () {
         if (mounted) _applyPromo();
       });
     }
   }
 
-  // ── [FIX-1] Razorpay setup — use official listeners only ──────────
-  //
-  // The previous version intercepted the raw MethodChannel to work around
-  // a PaymentFailureResponse.fromMap crash. This caused conflicts:
-  //   • On success: both the channel intercept AND the EVENT_PAYMENT_SUCCESS
-  //     listener fired, doubling the _finaliseOrder call.
-  //   • On some Android OEM ROMs: the channel intercept swallowed the message
-  //     before the plugin could read it, resulting in no callback at all.
-  //
-  // Fix: remove the channel intercept. Register all three official listeners.
-  // Wrap _razorpay.open() in try/catch to handle the PlatformException that
-  // the plugin throws for cancellation/error on older SDK versions.
+  // [FIX-1] Use official Razorpay listeners only — no MethodChannel intercept
   void _initRazorpay() {
     _razorpay.clear();
     _razorpay.on(Razorpay.EVENT_PAYMENT_SUCCESS, _onPaymentSuccess);
-    _razorpay.on(Razorpay.EVENT_PAYMENT_ERROR,   _onPaymentError);   // [FIX-1] was missing
+    _razorpay.on(Razorpay.EVENT_PAYMENT_ERROR,   _onPaymentError);
     _razorpay.on(Razorpay.EVENT_EXTERNAL_WALLET, _onExternalWallet);
   }
 
+  // [FIX-7] On cancel/failure: clear in-memory order data only.
+  // Nothing was written to Firestore, so no cleanup query needed.
   void _handlePaymentCancelled(String message) {
     _razorpayOpen = false;
-    if (_pendingOrderId != null) {
-      FirebaseFirestore.instance
-          .collection('orders')
-          .doc(_pendingOrderId)
-          .update({'status': 'cancelled', 'paymentStatus': 'failed'})
-          .catchError((_) {});
-      _pendingOrderId = null;
-    }
+    _pendingOrderData = null;
     if (mounted) {
       setState(() => _placing = false);
       _snack(message, _orange);
@@ -335,11 +316,8 @@ class _CheckoutScreenState extends State<CheckoutScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // When the app resumes from background (Razorpay sheet closed by pressing
-    // X or back), reset the spinner if no payment completed.
     if (state == AppLifecycleState.resumed && _razorpayOpen) {
       _razorpayOpen = false;
-      // Small delay so Razorpay's own callback fires first (if any)
       Future.delayed(const Duration(milliseconds: 600), () {
         if (mounted && _placing) {
           _handlePaymentCancelled('Payment cancelled. Please try again.');
@@ -351,7 +329,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _razorpay.clear(); // [FIX-6] no channel handler to remove anymore
+    _razorpay.clear();
     _addrCtrl.dispose();
     _landmarkCtrl.dispose();
     _pincodeCtrl.dispose();
@@ -371,7 +349,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       if (mounted) {
         setState(() => _placing = false);
         _snack(
-          'Payment received but order update failed. '
+          'Payment received but order save failed. '
           'Contact support with payment ID: ${response.paymentId ?? "unknown"}',
           _orange,
         );
@@ -379,7 +357,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
     });
   }
 
-  // [FIX-1] Proper error handler now registered on the Razorpay instance
   void _onPaymentError(PaymentFailureResponse response) {
     _razorpayOpen = false;
     final message = (response.message?.isNotEmpty == true)
@@ -394,7 +371,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
 
   Future<void> _loadSavedAddresses() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) { setState(() => _loadingAddr = false); return; }
+    if (user == null) { if (mounted) setState(() => _loadingAddr = false); return; }
     try {
       final doc = await FirebaseFirestore.instance
           .collection('users')
@@ -406,14 +383,12 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         if (_savedAddresses.isNotEmpty) _selectedAddrIdx = 0;
       }
     } catch (_) {}
-    setState(() => _loadingAddr = false);
+    if (mounted) setState(() => _loadingAddr = false);
   }
 
-  // ── Edit a saved address ───────────────────────────────────────────
   Future<void> _editAddress(int index) async {
     final a = _savedAddresses[index];
 
-    // Pre-fill controllers from the saved address
     final editAddrCtrl     = TextEditingController(text: a['address'] ?? '');
     final editLandmarkCtrl = TextEditingController();
     final editPincodeCtrl  = TextEditingController(text: a['pincode'] ?? '');
@@ -445,7 +420,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // ── Handle ───────────────────────────────────
                   Center(
                     child: Container(
                         width: 40, height: 4,
@@ -460,8 +434,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                           fontWeight: FontWeight.w800,
                           color: Color(0xFF1C1C1E))),
                   const SizedBox(height: 16),
-
-                  // ── Address type chips ──────────────────────
                   Row(
                     children: ['Home', 'Work', 'Other'].map((t) {
                       final sel = editType == t;
@@ -487,8 +459,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                     }).toList(),
                   ),
                   const SizedBox(height: 14),
-
-                  // ── Address field ────────────────────────────
                   _field('Street / Flat / Area *', editAddrCtrl,
                       hint: 'e.g. 42B, HSR Layout',
                       icon: Icons.location_on_outlined),
@@ -506,8 +476,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                         LengthLimitingTextInputFormatter(6),
                       ]),
                   const SizedBox(height: 14),
-
-                  // ── Pick on map button ───────────────────────
                   SizedBox(
                     width: double.infinity,
                     height: 44,
@@ -585,8 +553,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                     ),
                   ],
                   const SizedBox(height: 20),
-
-                  // ── Save button ──────────────────────────────
                   SizedBox(
                     width: double.infinity,
                     height: 50,
@@ -636,8 +602,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                     ),
                   ),
                   const SizedBox(height: 12),
-
-                  // ── Delete button ────────────────────────────
                   SizedBox(
                     width: double.infinity,
                     height: 46,
@@ -686,11 +650,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       ),
     );
 
-    // FIX: defer dispose until after the sheet is fully removed from the tree.
-    // Calling dispose() immediately after showModalBottomSheet returns can fire
-    // while Flutter's focus/keyboard system still holds a reference to these
-    // controllers (e.g. after "Change Location on Map" push/pop), causing:
-    //   "A TextEditingController was used after being disposed."
     WidgetsBinding.instance.addPostFrameCallback((_) {
       editAddrCtrl.dispose();
       editLandmarkCtrl.dispose();
@@ -726,7 +685,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       final doc  = snap.docs.first;
       final data = doc.data();
 
-      // ── Check expiry ────────────────────────────────────────────────────
       final expiryTs = data['expiryDate'];
       if (expiryTs != null) {
         final expiry = (expiryTs as Timestamp).toDate();
@@ -737,7 +695,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         }
       }
 
-      // ── Check if user already used this coupon ──────────────────────────
       final usedBy = List<String>.from(data['usedBy'] as List? ?? []);
       if (usedBy.contains(user.uid)) {
         setState(() { _appliedPromo = null; _discount = 0; _checkingPromo = false; });
@@ -775,18 +732,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   }
 
   // ── Restaurant reference location loader ──────────────────────────
-  /// Populates [_restaurantRefLat] / [_restaurantRefLng] exactly once.
-  ///
-  /// Priority:
-  ///   1. `restaurantLocation` embedded in any payload item (fastest — no Firestore read).
-  ///   2. Fetch `location` from `restaurants/{restaurantId}` in Firestore.
-  ///
-  /// The phone's live GPS is intentionally NOT used as a fallback, because
-  /// that was the root cause of the bypass: the check became
-  /// "how far is the delivery address from the user's phone?" which is always
-  /// ~0 km when the user is filling in checkout at their current location.
   Future<void> _loadRestaurantRefLocation() async {
-    // 1. Try embedded restaurantLocation on any item.
     for (final item in widget.payload.items) {
       final locMap = item['restaurantLocation'] as Map<String, dynamic>?;
       if (locMap != null) {
@@ -799,14 +745,13 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       }
     }
 
-    // 2. Fetch from Firestore using payload.restaurantId (or first item's restaurantId).
     final rId = (widget.payload.restaurantId?.isNotEmpty == true)
         ? widget.payload.restaurantId!
         : widget.payload.items
             .map((i) => i['restaurantId'] as String? ?? '')
             .firstWhere((id) => id.isNotEmpty, orElse: () => '');
 
-    if (rId.isEmpty) return; // No restaurant ID at all — can't enforce radius.
+    if (rId.isEmpty) return;
 
     try {
       final doc = await FirebaseFirestore.instance
@@ -824,30 +769,13 @@ class _CheckoutScreenState extends State<CheckoutScreen>
     }
   }
 
-  // ── 7 km delivery radius check ────────────────────────────────────
-  /// Returns the Haversine distance (km) between a delivery address and the
-  /// restaurant reference point ([_restaurantRefLat] / [_restaurantRefLng]).
-  ///
-  /// Returns `null` only if the restaurant location could not be resolved
-  /// (Firestore fetch failed AND no embedded location).  In that case the
-  /// caller skips the radius guard — consistent with the "fail open" policy
-  /// used elsewhere.
-  ///
-  /// ⚠️  We intentionally do NOT fall back to [LocationService.instance.current]
-  /// (the phone GPS) here.  Using the phone's live GPS as the reference makes
-  /// the check measure "delivery address vs phone location", which is always
-  /// ~0 km when the user is typing at their current location — completely
-  /// defeating the 7 km restaurant delivery radius.
   double? _distanceOfAddress(Map<String, dynamic> addr) {
     final addrLat = (addr['lat'] as num?)?.toDouble();
     final addrLng = (addr['lng'] as num?)?.toDouble();
     if (addrLat == null || addrLng == null) return null;
 
-    // Use the pre-loaded restaurant reference location.
     final refLat = _restaurantRefLat;
     final refLng = _restaurantRefLng;
-
-    // Reference not yet loaded or unavailable — skip the guard (fail open).
     if (refLat == null || refLng == null) return null;
 
     const R = 6371.0;
@@ -861,7 +789,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
     return R * 2 * atan2(sqrt(a), sqrt(1 - a));
   }
 
-  /// Distance (km) between a GPS-picked [AppLocation] and the restaurant.
   double? _distanceOfLocation(AppLocation loc) {
     return _distanceOfAddress({'lat': loc.lat, 'lng': loc.lng});
   }
@@ -870,7 +797,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
     switch (_step) {
       case 0:
         if (_selectedAddrIdx == -1) {
-          // Manual address — require text + pincode
           if (_addrCtrl.text.trim().isEmpty) {
             _snack('Please enter delivery address', _red);
             return false;
@@ -879,8 +805,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
             _snack('Enter a valid 6-digit pincode', _red);
             return false;
           }
-          // [FIX] Require a GPS pin for manual addresses so customerLat/Lng
-          // are never 0,0 in the order doc (which blocks the agent's live map).
           if (_deliveryLocation == null) {
             _snack(
               'Please pin your location on the map so the agent can find you.',
@@ -888,7 +812,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
             );
             return false;
           }
-          // ── 7 km radius guard for GPS-picked / new address ─────────────
           final distNew = _distanceOfLocation(_deliveryLocation!);
           if (distNew != null && distNew > 7.0) {
             _snack(
@@ -899,7 +822,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
             return false;
           }
         } else {
-          // Saved address selected — check it has GPS coords stored
           final saved = _savedAddresses[_selectedAddrIdx];
           final savedLat = (saved['lat'] as num?)?.toDouble() ?? 0.0;
           final savedLng = (saved['lng'] as num?)?.toDouble() ?? 0.0;
@@ -911,7 +833,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
             );
             return false;
           }
-          // ── 7 km radius guard ──────────────────────────────────────────
           final dist = _distanceOfAddress(saved);
           if (dist != null && dist > 7.0) {
             _snack(
@@ -928,15 +849,11 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   }
 
   // [FIX-2] Sanitise phone number for Razorpay contact field
-  // Razorpay expects a plain 10-digit number, NOT '+91XXXXXXXXXX'
   String _sanitisePhone(String raw) {
-    // Remove all spaces
     String phone = raw.replaceAll(' ', '');
-    // Strip leading '+91' (13 chars with +)
     if (phone.startsWith('+91') && phone.length == 13) {
       return phone.substring(3);
     }
-    // Strip leading '91' if 12 digits
     if (phone.startsWith('91') && phone.length == 12) {
       return phone.substring(2);
     }
@@ -944,7 +861,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   }
 
   Future<void> _placeOrder() async {
-    if (_placing) return; // prevent double-tap / re-entrant call
+    if (_placing) return;
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) { _snack('Please log in', _red); return; }
     setState(() => _placing = true);
@@ -961,10 +878,9 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       final userEmail = user.email ?? (userData['email'] as String? ?? '');
       final rawPhone  = user.phoneNumber ?? (userData['phone'] as String? ?? '');
 
-      // Store sanitised values for Razorpay prefill
       _prefillName  = userName;
       _prefillEmail = userEmail;
-      _prefillPhone = _sanitisePhone(rawPhone); // [FIX-2]
+      _prefillPhone = _sanitisePhone(rawPhone);
 
       final deliveryAddress = _selectedAddrIdx >= 0 && _savedAddresses.isNotEmpty
           ? '${_savedAddresses[_selectedAddrIdx]['address']}'
@@ -974,36 +890,31 @@ class _CheckoutScreenState extends State<CheckoutScreen>
 
       final p = widget.payload;
 
-      // ── Derive unique restaurant IDs and names ──────────────────────
       final restaurantId = (p.restaurantId?.isNotEmpty == true)
           ? p.restaurantId!
           : p.items
               .map((i) => i['restaurantId'] as String? ?? '')
               .firstWhere((id) => id.isNotEmpty, orElse: () => '');
 
-      // GPS coords fetched below after perRestaurantMap is built
       double restLat = 0.0;
       double restLng = 0.0;
 
-      // [FIX] Generate 4-digit delivery OTP
+      // [FIX-7] Generate OTP here — stored in memory until order is confirmed
       final otp = (1000 + Random().nextInt(9000)).toString();
+      _pendingOtp = otp;
 
-      // All unique restaurant names joined (for display everywhere)
       final allRestaurantNames = p.items
           .map((i) => i['restaurantName'] as String? ?? '')
           .where((n) => n.isNotEmpty)
           .toSet()
           .join(', ');
 
-      // All unique restaurant IDs (for owner portal filtering)
       final allRestaurantIds = p.items
           .map((i) => i['restaurantId'] as String? ?? '')
           .where((id) => id.isNotEmpty)
           .toSet()
           .toList();
 
-      // ── Per-restaurant item split + subtotal ────────────────────────
-      // Each restaurant owner sees only their items and correct subtotal
       final Map<String, Map<String, dynamic>> perRestaurantMap = {};
       for (final item in p.items) {
         final rId   = item['restaurantId'] as String? ?? '';
@@ -1019,11 +930,8 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         perRestaurantMap[rId]!['subtotal'] =
             (perRestaurantMap[rId]!['subtotal'] as double) + price * qty;
       }
-      // Convert to plain list of maps (no nested Lists — Firestore safe)
       final perRestaurant = perRestaurantMap.values.toList();
 
-      // ── Fetch GPS coords for ALL unique restaurants ─────────────────
-      // Build restaurants array: [{id, name, lat, lng}, ...] for multi-stop map
       final List<Map<String, dynamic>> restaurantsList = [];
       for (final entry in perRestaurantMap.entries) {
         final rId   = entry.key;
@@ -1042,29 +950,28 @@ class _CheckoutScreenState extends State<CheckoutScreen>
           debugPrint('[Checkout] Could not fetch location for $rId: $e');
         }
         restaurantsList.add({'id': rId, 'name': rName, 'lat': rLat, 'lng': rLng});
-        // Legacy single-restaurant fields = first restaurant
         if (restaurantsList.length == 1) {
           restLat = rLat;
           restLng = rLng;
         }
       }
 
-      final orderRef = await FirebaseFirestore.instance
-          .collection('orders')
-          .add({
+      // ── [FIX-7] Build order map in memory — NOT written to Firestore yet ──
+      // This is the core fix. Previously we called .add() here which created
+      // a ghost order document before payment. Now we store the data in
+      // _pendingOrderData and only write it in _finaliseOrder after the
+      // payment gateway confirms success (or immediately for COD).
+      _pendingOrderData = {
         'userId':             user.uid,
         'userName':           userName,
-        'customerName':       userName, // [FIX] agent dashboard reads 'customerName', not 'userName'
+        'customerName':       userName,
         'restaurantName':     allRestaurantNames,
         if (restaurantId.isNotEmpty) 'restaurantId': restaurantId,
         'restaurantLat':      restLat,
         'restaurantLng':      restLng,
-        // Multi-restaurant array — delivery map uses this for all stops
         'restaurants':        restaurantsList,
         'deliveryOtp':        otp,
-        // List of all restaurant IDs for owner portal array-contains query
         'restaurantIds':      allRestaurantIds,
-        // Per-restaurant breakdown for owner portal correct totals
         'perRestaurant':      perRestaurant,
         'items':              p.items,
         'source':             p.source,
@@ -1077,29 +984,21 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         'taxes':              _tax,
         'grandTotal':         _grand,
         'deliveryAddress':    deliveryAddress,
-        'customerAddress':    deliveryAddress, // [FIX] agent card reads 'customerAddress'
+        'customerAddress':    deliveryAddress,
         'deliverySlot':       _slots[_slotIdx],
         'paymentMethod':      _payMethod == 'cod' ? 'COD' : 'Razorpay',
-        'paymentStatus':      _payMethod == 'cod' ? 'pending_cod' : 'pending_payment',
+        // paymentStatus and paymentId are added by _finaliseOrder
         'status':             'pending',
         'totalCalories':      p.totalCalories,
         'totalProtein':       p.totalProtein,
         'totalCarbs':         p.totalCarbs,
         'totalFat':           p.totalFat,
-        // ── GPS delivery location (if user used location pick) ──
         if (_deliveryLocation != null)
           'deliveryLocation': {
             'lat':     _deliveryLocation!.lat,
             'lng':     _deliveryLocation!.lng,
             'address': _deliveryLocation!.address,
           },
-
-        // [FIX] Write flat customerLat/customerLng fields that the delivery
-        // agent dashboard reads directly from the order doc. Previously only
-        // deliveryLocation:{lat,lng} was written, so the agent always got 0,0
-        // and showed "Customer delivery location not set".
-        //
-        // Priority: GPS-picked location → saved address coords → 0.0 fallback.
         'customerLat': _deliveryLocation?.lat ??
             (_selectedAddrIdx >= 0 && _selectedAddrIdx < _savedAddresses.length
                 ? (_savedAddresses[_selectedAddrIdx]['lat'] as num?)?.toDouble() ?? 0.0
@@ -1108,30 +1007,128 @@ class _CheckoutScreenState extends State<CheckoutScreen>
             (_selectedAddrIdx >= 0 && _selectedAddrIdx < _savedAddresses.length
                 ? (_savedAddresses[_selectedAddrIdx]['lng'] as num?)?.toDouble() ?? 0.0
                 : 0.0),
-        // [FIX] Embed customer FCM token so delivery agent can push-notify
-        // the customer without reading users/{uid} (permission-denied for agents).
         'customerFcmToken':   userData['fcmToken'] as String? ?? '',
         'createdAt':          FieldValue.serverTimestamp(),
+        // Internal-only: saved address index so _finaliseOrder can persist new addresses
+        '__selectedAddrIdx':  _selectedAddrIdx,
+        '__addrText':         _addrCtrl.text.trim(),
+        '__landmarkText':     _landmarkCtrl.text.trim(),
+        '__pincodeText':      _pincodeCtrl.text.trim(),
+        '__addrType':         _addrType,
+        '__savedAddresses':   _savedAddresses,
+        '__userId':           user.uid,
+      };
+
+      // COD: write immediately — no payment gateway needed
+      if (_payMethod == 'cod') {
+        await _finaliseOrder(
+            paymentId: '', paymentStatus: 'pending_cod', method: 'COD');
+        return;
+      }
+    } catch (e, st) {
+      debugPrint('_placeOrder setup error: $e\n$st');
+      if (mounted) setState(() => _placing = false);
+      _snack('Something went wrong. Please try again.', _red);
+      return;
+    }
+
+    // ── [FIX-1] Open Razorpay sheet ──────────────────────────────────
+    _razorpayOpen = true;
+    final int amountPaise = _grandPaise;
+    debugPrint('[Razorpay] open() — amount=$amountPaise paise, contact=$_prefillPhone');
+    try {
+      _razorpay.open(<String, dynamic>{
+        'key':         _razorpayKey,
+        'amount':      amountPaise,
+        'name':        'FoodFeast',
+        'description': 'Order from ${widget.payload.restaurantName}',
+        'currency':    'INR',
+        'save':        1,
+        'prefill': <String, String>{
+          'name':    _prefillName,
+          'email':   _prefillEmail,
+          'contact': _prefillPhone,
+        },
+        'theme': <String, String>{'color': '#0077B6'},
       });
+    } on PlatformException catch (e) {
+      debugPrint('Razorpay open PlatformException: $e');
+      _handlePaymentCancelled('Could not open payment. Please try again.');
+    } catch (e) {
+      debugPrint('Razorpay open error: $e');
+      _handlePaymentCancelled('Could not open payment. Please try again.');
+    }
+  }
 
-      _pendingOrderId = orderRef.id;
-      _pendingOtp     = otp;
+  Future<void> _finaliseOrder({
+    required String paymentId,
+    required String paymentStatus,
+    required String method,
+  }) async {
+    // [FIX-7] Order data must be present — built in _placeOrder before Razorpay opened.
+    // If it's null here, payment arrived but setup never completed — surface to user.
+    final orderData = _pendingOrderData;
+    if (orderData == null) {
+      debugPrint('_finaliseOrder: _pendingOrderData is null — aborting. paymentId=$paymentId');
+      if (mounted) {
+        setState(() => _placing = false);
+        _snack(
+          'Order data missing. Payment received (ID: $paymentId). Contact support.',
+          _red,
+        );
+      }
+      return;
+    }
 
-      // Save new address if entered manually
-      if (_selectedAddrIdx == -1 && _addrCtrl.text.trim().isNotEmpty) {
+    try {
+      final p    = widget.payload;
+      final user = FirebaseAuth.instance.currentUser!;
+
+      // Pull internal helper fields out before writing to Firestore
+      final selectedAddrIdx = orderData['__selectedAddrIdx'] as int;
+      final addrText        = orderData['__addrText'] as String;
+      final landmarkText    = orderData['__landmarkText'] as String;
+      final pincodeText     = orderData['__pincodeText'] as String;
+      final addrType        = orderData['__addrType'] as String;
+      final savedAddresses  = orderData['__savedAddresses'] as List<Map<String, dynamic>>;
+
+      // Build the clean Firestore document — strip internal-only __ keys
+      final firestoreDoc = Map<String, dynamic>.from(orderData)
+        ..remove('__selectedAddrIdx')
+        ..remove('__addrText')
+        ..remove('__landmarkText')
+        ..remove('__pincodeText')
+        ..remove('__addrType')
+        ..remove('__savedAddresses')
+        ..remove('__userId');
+
+      // Merge payment result fields
+      firestoreDoc['paymentStatus'] = paymentStatus;
+      firestoreDoc['paymentId']     = paymentId;
+      firestoreDoc['paymentMethod'] = method;
+
+      // [FIX-7] Write to Firestore NOW — only after payment is confirmed
+      final orderRef = await FirebaseFirestore.instance
+          .collection('orders')
+          .add(firestoreDoc);
+
+      // [FIX-7] Clear in-memory data so a retry cannot double-write
+      _pendingOrderData = null;
+
+      final orderId = orderRef.id;
+
+      // Persist new address if the user entered one manually
+      if (selectedAddrIdx == -1 && addrText.isNotEmpty) {
         await FirebaseFirestore.instance
             .collection('users')
             .doc(user.uid)
             .update({
           'savedAddresses': [
-            ..._savedAddresses,
+            ...savedAddresses,
             {
-              'address': '${_addrCtrl.text.trim()}, '
-                  '${_landmarkCtrl.text.trim()}, '
-                  '${_pincodeCtrl.text.trim()}',
-              'type':    _addrType,
-              'pincode': _pincodeCtrl.text.trim(),
-              // ── Save GPS coords if user used location pick ──
+              'address': '$addrText, $landmarkText, $pincodeText',
+              'type':    addrType,
+              'pincode': pincodeText,
               if (_deliveryLocation != null) ...{
                 'lat': _deliveryLocation!.lat,
                 'lng': _deliveryLocation!.lng,
@@ -1141,7 +1138,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         });
       }
 
-      // Mark coupon as used (fire-and-forget — safe to fail)
+      // Mark coupon as used (fire-and-forget)
       if (_appliedPromo != null) {
         FirebaseFirestore.instance
             .collection('coupons')
@@ -1161,92 +1158,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         }).catchError((_) {});
       }
 
-      if (_payMethod == 'cod') {
-        await _finaliseOrder(
-            paymentId: '', paymentStatus: 'cod', method: 'COD');
-        return;
-      }
-    } catch (e, st) {
-      // Only Firestore / address errors land here.
-      // _razorpay.open() is called OUTSIDE this try block because
-      // Razorpay internally throws PlatformExceptions for its own
-      // navigation that must not be caught here.
-      debugPrint('_placeOrder setup error: $e\n$st');
-      if (mounted) setState(() => _placing = false);
-      _snack('Something went wrong. Please try again.', _red);
-      return;
-    }
-
-    // ── [FIX-1] Open Razorpay sheet ──────────────────────────────────
-    // Wrap in try/catch: older razorpay_flutter versions throw a
-    // PlatformException here on some Android devices for cancellation.
-    _razorpayOpen = true;
-    // [FIX-7] Explicitly type the map and cast amount to int.
-    // Razorpay SDK silently ignores the open() call on some Android versions
-    // if the amount value is not a strict Dart int.
-    final int amountPaise = _grandPaise;
-    debugPrint('[Razorpay] open() called — amount=$amountPaise paise, contact=$_prefillPhone');
-    try {
-      _razorpay.open(<String, dynamic>{
-        'key':         _razorpayKey,
-        'amount':      amountPaise,
-        'name':        'FoodFeast',
-        'description': 'Order from ${widget.payload.restaurantName}',
-        'currency':    'INR',
-        'prefill': <String, String>{
-          'name':    _prefillName,
-          'email':   _prefillEmail,
-          'contact': _prefillPhone,
-        },
-        'theme': <String, String>{'color': '#0077B6'},
-      });
-    } on PlatformException catch (e) {
-      // Razorpay SDK threw during open (e.g. activity not available)
-      debugPrint('Razorpay open PlatformException: $e');
-      _handlePaymentCancelled('Could not open payment. Please try again.');
-    } catch (e) {
-      debugPrint('Razorpay open error: $e');
-      _handlePaymentCancelled('Could not open payment. Please try again.');
-    }
-  }
-
-  Future<void> _finaliseOrder({
-    required String paymentId,
-    required String paymentStatus,
-    required String method,
-  }) async {
-    // [FIX-4] Capture into local variable before any await to avoid race conditions
-    final orderId = _pendingOrderId;
-    if (orderId == null) {
-      debugPrint(
-          '_finaliseOrder: _pendingOrderId is null — aborting. '
-          'paymentId=$paymentId');
-      if (mounted) {
-        setState(() => _placing = false);
-        _snack(
-          'Order ID missing. Payment was received (ID: $paymentId). '
-          'Please contact support.',
-          _red,
-        );
-      }
-      return;
-    }
-
-    try {
-      final p    = widget.payload;
-      final user = FirebaseAuth.instance.currentUser!;
-
-      // 1. Mark order as pending (restaurant must accept it)
-      await FirebaseFirestore.instance
-          .collection('orders')
-          .doc(orderId)
-          .update({
-        'status':        'pending',
-        'paymentStatus': paymentStatus,
-        'paymentId':     paymentId,
-        'paymentMethod': method,
-      });
-
       await CalorieTracker.instance.addOrderNutrition(
         calories: _myCalories,
         protein:  _myProtein,
@@ -1257,8 +1168,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       if (p.source == 'cart') CartProvider.instance.clearCart();
       widget.onOrderSuccess?.call();
 
-      // 2. Notify each restaurant owner separately (fire-and-forget)
-      // Build per-restaurant map: restaurantId → {items, subtotal}
+      // Notify each restaurant owner (fire-and-forget)
       final Map<String, Map<String, dynamic>> perRestaurantMap = {};
       for (final item in p.items) {
         final rId = item['restaurantId'] as String? ?? '';
@@ -1284,15 +1194,14 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                 ? userDoc.data()!['name'] as String
                 : (user.displayName ?? 'A customer');
 
-        // Send a separate notification to each restaurant
         for (final entry in perRestaurantMap.entries) {
           _sendRestaurantOwnerNotification(
-            restaurantId:     entry.key,
-            orderId:          orderId,
-            userName:         userName,
-            restaurantItems:  List<Map<String, dynamic>>.from(entry.value['items'] as List),
+            restaurantId:       entry.key,
+            orderId:            orderId,
+            userName:           userName,
+            restaurantItems:    List<Map<String, dynamic>>.from(entry.value['items'] as List),
             restaurantSubtotal: entry.value['subtotal'] as double,
-            deliverySlot:     _slots[_slotIdx],
+            deliverySlot:       _slots[_slotIdx],
           );
         }
       }
@@ -1305,12 +1214,11 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       debugPrint('_finaliseOrder Firestore error: $e');
       if (mounted) {
         setState(() => _placing = false);
-        _snack('Order confirmed but failed to update records.', _red);
+        _snack('Order confirmed but failed to save records. Payment: $paymentId', _red);
       }
     }
   }
 
-  // ── Send push + write Firestore notification for one restaurant ────
   void _sendRestaurantOwnerNotification({
     required String restaurantId,
     required String orderId,
@@ -1319,7 +1227,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
     required double restaurantSubtotal,
     required String deliverySlot,
   }) {
-    // Only show items belonging to this restaurant
     final itemSummary = restaurantItems.map((item) {
       final name = item['name'] as String? ?? 'Item';
       final qty  = (item['quantity'] as num? ?? 1).toInt();
@@ -1341,7 +1248,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         return;
       }
 
-      // ── 1. Write to Firestore (in-app notifications feed) ─────────
       await FirebaseFirestore.instance.collection('notifications').add({
         'targetUid':    ownerUid,
         'orderId':      orderId,
@@ -1354,18 +1260,9 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         'sentAt':       FieldValue.serverTimestamp(),
       });
 
-      // ── 2. Send FCM push to restaurant owner's device ─────────────
-      // Read FCM token from the restaurant doc (publicly readable by any
-      // signed-in user). Reading from users/{ownerUid} would fail with
-      // [permission-denied] because Firestore rules only allow a user to
-      // read their own user doc — a customer cannot read the owner's doc.
-      // FcmService.saveToken() writes ownerFcmToken here whenever the
-      // restaurant owner opens the app, so this is always up-to-date.
       final fcmToken = restaurantSnap.data()?['ownerFcmToken'] as String?;
-
       if (fcmToken == null || fcmToken.isEmpty) {
-        debugPrint('[FCM] No ownerFcmToken on restaurant $restaurantId — '
-            'restaurant owner has not opened the app recently.');
+        debugPrint('[FCM] No ownerFcmToken on restaurant $restaurantId');
         return;
       }
 
@@ -1426,7 +1323,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                       fontWeight: FontWeight.w600)),
               const SizedBox(height: 16),
 
-              // OTP card
               if (otp.isNotEmpty)
                 Container(
                   width: double.infinity,
@@ -1520,9 +1416,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                           borderRadius: BorderRadius.circular(14)),
                       elevation: 0),
                   onPressed: () {
-                    // Pop the success dialog + the entire CheckoutScreen so
-                    // pressing Back from OrderTracking goes to Home (or the
-                    // screen that launched checkout), not back to checkout.
                     Navigator.of(context).pushAndRemoveUntil(
                       MaterialPageRoute(
                         builder: (_) => OrderTrackingScreen(orderId: orderId),
@@ -1553,7 +1446,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
               ),
             ]),
           ),
-          ), // SingleChildScrollView
+          ),
         );
       },
     );
@@ -1692,7 +1585,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                                     color: Color(0xFF6E6E73)),
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis),
-                            // ── Distance badge ─────────────────────
                             Builder(builder: (_) {
                               final dist = _distanceOfAddress(a);
                               if (dist == null) return const SizedBox.shrink();
@@ -1722,7 +1614,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                               );
                             }),
                           ])),
-                      // ── Edit button ────────────────────────
                       GestureDetector(
                         onTap: () => _editAddress(e.key),
                         child: Container(
@@ -1742,7 +1633,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                     ]),
                   ),
                 ),
-                // ── Mini map preview when this address is selected ──
                 if (sel && hasCoords) ...[
                   const SizedBox(height: 6),
                   ClipRRect(
@@ -1757,7 +1647,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                                 (a['lng'] as num).toDouble()),
                             initialZoom: 15,
                             interactionOptions: const InteractionOptions(
-                              flags: InteractiveFlag.none, // read-only
+                              flags: InteractiveFlag.none,
                             ),
                           ),
                           children: [
@@ -1779,7 +1669,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                             ]),
                           ],
                         ),
-                        // Tap overlay — opens full map picker to repin
                         Positioned(
                           bottom: 8, right: 8,
                           child: GestureDetector(
@@ -1845,7 +1734,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         ],
         if (_selectedAddrIdx == -1)
           _card(Column(children: [
-            // ── Location quick-fill buttons ────────────────
             Row(children: [
               Expanded(
                 child: GestureDetector(
@@ -1867,8 +1755,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                         children: [
                       if (_fetchingLocation)
                         const SizedBox(
-                          width: 14,
-                          height: 14,
+                          width: 14, height: 14,
                           child: CircularProgressIndicator(
                               color: _blue, strokeWidth: 2),
                         )
@@ -1916,7 +1803,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                 ),
               ),
             ]),
-            // Show confirmed location badge if set
             if (_deliveryLocation != null) ...[
               const SizedBox(height: 10),
               Builder(builder: (_) {
@@ -1988,8 +1874,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                         decoration: BoxDecoration(
                           color: _orange.withOpacity(0.06),
                           borderRadius: BorderRadius.circular(8),
-                          border:
-                              Border.all(color: _orange.withOpacity(0.3)),
+                          border: Border.all(color: _orange.withOpacity(0.3)),
                         ),
                         child: const Row(children: [
                           Icon(Icons.info_outline_rounded,
@@ -2013,7 +1898,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
               }),
             ],
             const SizedBox(height: 14),
-            // ── Address type chips ──────────────────────────
             Row(
                 children: ['Home', 'Work', 'Other'].map((t) {
               final sel = _addrType == t;
@@ -2260,7 +2144,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       _header('📋 Order Summary'),
       const SizedBox(height: 14),
 
-      // Items list
       _card(Column(
           children: p.items
               .map((item) => Padding(
@@ -2309,7 +2192,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
               .toList())),
       const SizedBox(height: 12),
 
-      // Delivery & payment summary
       _card(Column(children: [
         _reviewRow(
             Icons.location_on_rounded,
@@ -2327,7 +2209,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       ])),
       const SizedBox(height: 12),
 
-      // Bill
       _card(Column(children: [
         _billRow('Subtotal', '₹${_subtotal.toStringAsFixed(0)}'),
         if (_discount > 0)
@@ -2343,7 +2224,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         _billRow('Total', '₹${_grand.toStringAsFixed(0)}', bold: true),
       ])),
 
-      // Ordering mode
       const SizedBox(height: 16),
       _header('👥 Who is this order for?'),
       const SizedBox(height: 10),
@@ -2354,7 +2234,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
           _modeChip('group', '👨‍👩‍👧‍👦 Group Order', "Pick what I'm eating"),
         ]),
 
-        // Per-item quantity steppers in group mode
         if (_orderingMode == 'group') ...[
           const SizedBox(height: 14),
           const Divider(height: 1, color: Color(0xFFF0F0F5)),
@@ -2467,7 +2346,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
                       ),
                   ]),
 
-                  // Quantity stepper
                   if (isMine) ...[
                     const SizedBox(height: 10),
                     Row(children: [
@@ -2546,7 +2424,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
             );
           }),
 
-          // Quick-select helpers
           const SizedBox(height: 4),
           Row(children: [
             GestureDetector(
@@ -2583,7 +2460,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         ],
       ])),
 
-      // Nutrition summary
       if (p.totalCalories > 0) ...[
         const SizedBox(height: 12),
         Container(
@@ -2623,8 +2499,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
             Row(
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: [
-                  _macroCell(
-                      '🔥', 'Cal', '$_myCalories', _orange),
+                  _macroCell('🔥', 'Cal', '$_myCalories', _orange),
                   _macroCell('💪', 'Protein',
                       '${_myProtein.toStringAsFixed(0)}g',
                       const Color(0xFF007AFF)),
