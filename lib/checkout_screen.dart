@@ -61,6 +61,7 @@ import 'package:razorpay_flutter/razorpay_flutter.dart';
 
 import 'calorie_tracker.dart';
 import 'cart_provider.dart';
+import 'dynamic_island_overlay.dart';
 import 'fcm_service.dart';
 import 'location_service.dart';
 import 'order_tracking_screen.dart';
@@ -1208,6 +1209,10 @@ class _CheckoutScreenState extends State<CheckoutScreen>
 
       if (mounted) {
         setState(() => _placing = false);
+        // Trigger Dynamic Island AFTER the frame so the global overlay is ready
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          DynamicIslandService.instance.show(orderId: orderId);
+        });
         _showSuccessDialog(orderId: orderId, otp: _pendingOtp ?? '');
       }
     } catch (e) {

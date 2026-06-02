@@ -1,22 +1,24 @@
-import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'firebase_options.dart';
+import 'package:flutter/material.dart';
 
-import 'login_screen.dart';
-import 'home_screen.dart';
 import 'admin_screen.dart';
-import 'restaurant_screen.dart';
-import 'fcm_service.dart';
-import 'local_notification_service.dart';
-import 'calorie_tracker.dart';
 import 'agent_pending_screen.dart';
+import 'calorie_tracker.dart';
 import 'delivery_agent_dashboard.dart';
+import 'dynamic_island_overlay.dart'; // ← Dynamic Island
+import 'firebase_options.dart';
+import 'home_screen.dart';
+import 'local_notification_service.dart';
+import 'location_service.dart';
+import 'login_screen.dart';
+import 'restaurant_screen.dart';
 import 'splash_screen.dart';
 
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'location_service.dart';
+// ── Global navigator key — required by DynamicIslandService ──────────────────
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {}
@@ -39,8 +41,8 @@ class FoodFeastBootstrap extends StatefulWidget {
 
 class _FoodFeastBootstrapState extends State<FoodFeastBootstrap> {
   User? _initialUser;
-  bool  _firebaseDone   = false;
-  bool  _animationDone  = false;
+  bool  _firebaseDone  = false;
+  bool  _animationDone = false;
 
   @override
   void initState() {
@@ -100,7 +102,6 @@ class _FoodFeastBootstrapState extends State<FoodFeastBootstrap> {
       return FoodFeastApp(initialUser: _initialUser);
     }
 
-    // Show splash and pass the callback so it can tell us when it's done
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       home: SplashScreen(onAnimationDone: _onAnimationDone),
@@ -108,20 +109,35 @@ class _FoodFeastBootstrapState extends State<FoodFeastBootstrap> {
   }
 }
 
-class FoodFeastApp extends StatelessWidget {
+class FoodFeastApp extends StatefulWidget {
   final User? initialUser;
   const FoodFeastApp({super.key, required this.initialUser});
+
+  @override
+  State<FoodFeastApp> createState() => _FoodFeastAppState();
+}
+
+class _FoodFeastAppState extends State<FoodFeastApp> {
+
+  @override
+  void initState() {
+    super.initState();
+    // Init Dynamic Island service with the global navigator key.
+    // detect() runs in background — no delay to app startup.
+    DynamicIslandService.instance.init(navigatorKey);
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'FoodFeast',
       debugShowCheckedModeBanner: false,
+      navigatorKey: navigatorKey, // ← required for overlay + navigation
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0077B6)),
         useMaterial3: true,
       ),
-      home: AuthGate(initialUser: initialUser),
+      home: AuthGate(initialUser: widget.initialUser),
     );
   }
 }
@@ -231,8 +247,6 @@ class _AuthGateState extends State<AuthGate> {
     }
   }
 
-  // Lightweight loading shown only if Firestore role fetch is slow
-  // (Firebase init is already done at this point — this is rare)
   static const _loadingWidget = Scaffold(
     backgroundColor: Colors.black,
     body: Center(
@@ -266,6 +280,8 @@ class _AuthGateState extends State<AuthGate> {
         if (_uid != null) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted) {
+              // Dismiss island on logout
+              DynamicIslandService.instance.dismiss();
               CalorieTracker.instance.reset();
               setState(() {
                 _uid          = null;
@@ -311,13 +327,16 @@ class _MissingRestaurantScreen extends StatelessWidget {
               const Text(
                 'Your account is set up but no restaurant has been linked yet.\n\nPlease contact the admin to assign your restaurant.',
                 textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 14, color: Color(0xFF6E6E73), height: 1.6),
+                style: TextStyle(
+                    fontSize: 14, color: Color(0xFF6E6E73), height: 1.6),
               ),
               const SizedBox(height: 8),
               Text(
                 'UID: $uid',
                 style: const TextStyle(
-                    fontSize: 11, color: Color(0xFFAEAEB2), fontFamily: 'monospace'),
+                    fontSize: 11,
+                    color: Color(0xFFAEAEB2),
+                    fontFamily: 'monospace'),
               ),
               const SizedBox(height: 32),
               OutlinedButton.icon(
@@ -325,13 +344,16 @@ class _MissingRestaurantScreen extends StatelessWidget {
                   side: const BorderSide(color: Color(0xFF0077B6)),
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14)),
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 24, vertical: 14),
                 ),
                 onPressed: () async => FirebaseAuth.instance.signOut(),
-                icon: const Icon(Icons.logout_rounded, color: Color(0xFF0077B6)),
+                icon: const Icon(Icons.logout_rounded,
+                    color: Color(0xFF0077B6)),
                 label: const Text('Sign Out',
                     style: TextStyle(
-                        color: Color(0xFF0077B6), fontWeight: FontWeight.w700)),
+                        color: Color(0xFF0077B6),
+                        fontWeight: FontWeight.w700)),
               ),
             ],
           ),
